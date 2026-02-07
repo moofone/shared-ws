@@ -5,22 +5,24 @@ This crate provides a high-performance WebSocket connection manager designed for
 - Fast IO loops outside the actor runtime.
 - Deterministic state transitions inside a single kameo actor.
 - Self-healing reconnects with preserved adapter state.
-- Zero-copy inbound parsing (borrow transport frame bytes).
+- Transport-neutral frames (`WsFrame`).
 - A swappable transport boundary (tokio-tungstenite today; fastwebsockets later).
 
 ## Key Components
 
-### `WebSocketActor<E, R, P, T>`
+### `WebSocketActor<E, R, P, I, T>`
 
-`E: WsEndpointHandler` owns all adapter-specific state (auth, subscriptions, decode pipeline).
+`E: WsEndpointHandler` owns endpoint-specific state (auth, subscriptions, protocol decode pipeline).
 
 `R: WsReconnectStrategy` decides backoff behavior.
 
 `P: WsPingPongStrategy` handles heartbeats and staleness detection.
 
+`I: WsIngress` is the tight-loop ingress decoder/aggregator/filter that runs outside kameo.
+
 The actor:
 
-- Spawns a `reader_task` that blocks on socket reads and forwards each frame into the actor mailbox.
+- Spawns a `reader_task` that blocks on socket reads.
 - Spawns a `WsWriterActor` to serialize outbound frames.
 - Runs subscription/auth orchestration and disconnect classification inside the actor.
 
@@ -29,10 +31,23 @@ The actor:
 The reader runs in a dedicated Tokio task and does:
 
 - `read.next()` on the socket stream.
-- On each frame: `actor_ref.tell(WebSocketEvent::Inbound(frame))`.
+- For each frame: `ingress.on_frame(&frame)`.
+- Depending on the ingress decision:
+  - ignore the frame,
+  - forward the raw `WsFrame` into the actor (`WebSocketEvent::Inbound`), or
+  - emit a compact decoded event (`IngressEmit<E::Message>`).
 - On close/error: `actor_ref.tell(WebSocketEvent::Disconnect { ... })`.
 
-This isolates IO from actor scheduling while keeping state mutations within the actor.
+Ingress state continuity:
+
+- The actor owns `I` and moves it into the reader task on connect.
+- When the reader task terminates, it returns `I` via the task `JoinHandle`, and the actor stores it
+  back so state is preserved across reconnects.
+
+Stale detection continuity:
+
+- Even if ingress ignores all frames, the reader task periodically emits `WebSocketEvent::InboundActivity`
+  so `WsHealthMonitor` does not incorrectly mark the connection stale.
 
 ### Writer Actor (Kameo)
 
@@ -66,7 +81,7 @@ Stale detection uses:
 - `Writer: Sink<WsFrame, Error = WebSocketError>`
 
 The only dynamic dispatch is on `connect()` (boxed future). The inner read/write
-loops are monomorphized and do not allocate per frame.
+loops are monomorphized.
 
 ## Known Gaps
 
