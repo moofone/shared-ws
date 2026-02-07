@@ -78,6 +78,14 @@ impl WsHealthMonitor {
         self.message_count = self.message_count.saturating_add(1);
     }
 
+    pub fn record_inbound_frames(&mut self, frames: u64) {
+        if frames == 0 {
+            return;
+        }
+        self.last_message_received = Instant::now();
+        self.message_count = self.message_count.saturating_add(frames);
+    }
+
     pub fn record_sent(&mut self) {
         self.last_message_sent = Instant::now();
     }

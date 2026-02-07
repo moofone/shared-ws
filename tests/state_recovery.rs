@@ -319,6 +319,7 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
             delay: Duration::from_millis(10),
         },
         handler,
+        ingress: defi_ws::core::ForwardAllIngress,
         ping_strategy: ProtocolPingPong::new(Duration::from_secs(60), Duration::from_secs(60)),
         enable_ping: false,
         stale_threshold: Duration::from_secs(30),
@@ -380,6 +381,7 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
         handler,
         // Use application-level heartbeat to avoid tungstenite's protocol-level auto-pong behavior.
         // interval > timeout ensures we trip stale after the first ping goes unanswered.
+        ingress: defi_ws::core::ForwardAllIngress,
         ping_strategy: WsApplicationPingPong::new(
             Duration::from_millis(60),
             Duration::from_millis(20),

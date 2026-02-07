@@ -10,6 +10,54 @@ use super::frame::WsFrame;
 /// Convenience result alias for websocket operations.
 pub type WebSocketResult<T> = Result<T, WebSocketError>;
 
+/// Ingress decision produced by a tight-loop decoder running outside the actor runtime.
+///
+/// This allows providers to parse/aggregate/filter in the IO loop, only forwarding the
+/// minimal set of "interesting" events into the actor mailbox.
+#[derive(Debug)]
+pub enum WsIngressAction<M>
+where
+    M: Send + 'static,
+{
+    /// Ignore this frame (still counts as inbound activity for stale detection).
+    Ignore,
+    /// Emit an application event into the actor.
+    Emit(M),
+    /// Forward the raw frame to the actor for full handling.
+    Forward(WsFrame),
+    /// Request reconnect with a reason.
+    Reconnect(String),
+    /// Request full shutdown with a reason.
+    Shutdown(String),
+}
+
+/// Tight-loop decoder/aggregator/filter that runs outside kameo (in the reader task).
+///
+/// The actor owns this state and moves it into the reader task on connect; on disconnect
+/// the state is handed back to the actor to preserve continuity across reconnects.
+pub trait WsIngress: Send + 'static {
+    type Message: Send + 'static;
+
+    fn on_open(&mut self) {}
+
+    fn on_frame(&mut self, frame: &WsFrame) -> WsIngressAction<Self::Message>;
+
+    fn on_disconnect(&mut self, _cause: &WsDisconnectCause) {}
+}
+
+/// Default ingress that forwards every frame into the actor.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ForwardAllIngress;
+
+impl WsIngress for ForwardAllIngress {
+    type Message = ();
+
+    #[inline]
+    fn on_frame(&mut self, frame: &WsFrame) -> WsIngressAction<Self::Message> {
+        WsIngressAction::Forward(frame.clone())
+    }
+}
+
 /// Canonical websocket error surface shared across the infrastructure.
 #[derive(Debug, Error)]
 pub enum WebSocketError {
@@ -351,4 +399,3 @@ where
 pub fn message_bytes(frame: &WsFrame) -> Option<&[u8]> {
     super::frame::frame_bytes(frame)
 }
-

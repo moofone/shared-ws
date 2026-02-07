@@ -9,7 +9,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use sonic_rs::Value;
@@ -25,11 +25,12 @@ use super::health::WsHealthMonitor;
 use super::ping::{WsPingPongStrategy, WsPongResult};
 use super::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
 use super::types::{
-    WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration, WsBufferPool,
-    WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause, WsErrorAction,
-    WsEndpointHandler, WsLatencyPercentile, WsLatencyPolicy, WsMessage, WsMessageAction,
-    WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsTlsConfig,
-    WsSubscriptionStatus, into_ws_message, message_bytes,
+    ForwardAllIngress, WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration,
+    WsBufferPool, WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
+    WsErrorAction, WsEndpointHandler, WsIngress, WsIngressAction, WsLatencyPercentile,
+    WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsReconnectStrategy,
+    WsSubscriptionAction, WsSubscriptionManager, WsTlsConfig, WsSubscriptionStatus, into_ws_message,
+    message_bytes,
 };
 use super::writer::{
     WriterWrite, WsWriterActor, spawn_writer_supervisor, spawn_writer_supervised_with,
@@ -49,11 +50,12 @@ struct LatencyBreach {
 }
 
 /// Arguments passed when constructing a websocket actor instance.
-pub struct WebSocketActorArgs<E, R, P, T = TungsteniteTransport>
+pub struct WebSocketActorArgs<E, R, P, I = ForwardAllIngress, T = TungsteniteTransport>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     pub url: String,
@@ -62,6 +64,7 @@ where
     pub reconnect_strategy: R,
     pub handler: E,
     pub ping_strategy: P,
+    pub ingress: I,
     pub enable_ping: bool,
     pub stale_threshold: Duration,
     pub ws_buffers: WebSocketBufferConfig,
@@ -74,11 +77,12 @@ where
 }
 
 /// Skeleton websocket actor that will be fleshed out in later sprints.
-pub struct WebSocketActor<E, R, P, T = TungsteniteTransport>
+pub struct WebSocketActor<E, R, P, I = ForwardAllIngress, T = TungsteniteTransport>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     pub url: String,
@@ -88,11 +92,12 @@ where
     pub reconnect: R,
     pub handler: E,
     pub ping: P,
+    pub ingress: Option<I>,
     pub enable_ping: bool,
     pub actor_ref: ActorRef<Self>,
     pub buffers: WsBufferPool,
     pub ws_buffers: WebSocketBufferConfig,
-    pub reader_task: Option<JoinHandle<()>>,
+    pub reader_task: Option<JoinHandle<I>>,
     pub ping_task: Option<JoinHandle<()>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -117,14 +122,15 @@ where
     _phantom: PhantomData<P>,
 }
 
-impl<E, R, P, T> Actor for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> Actor for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
-    type Args = WebSocketActorArgs<E, R, P, T>;
+    type Args = WebSocketActorArgs<E, R, P, I, T>;
     type Error = WebSocketError;
 
     fn name() -> &'static str {
@@ -139,6 +145,7 @@ where
             reconnect_strategy,
             handler,
             ping_strategy,
+            ingress,
             enable_ping,
             stale_threshold,
             ws_buffers,
@@ -184,6 +191,7 @@ where
             reconnect: reconnect_strategy,
             handler,
             ping: ping_strategy,
+            ingress: Some(ingress),
             enable_ping,
             actor_ref,
             buffers,
@@ -239,11 +247,12 @@ where
     }
 }
 
-impl<E, R, P, T> KameoMessage<WebSocketEvent> for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> KameoMessage<WebSocketEvent> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<()>;
@@ -264,6 +273,17 @@ where
             }
             WebSocketEvent::Inbound(message) => {
                 self.process_inbound(message).await?;
+            }
+            WebSocketEvent::InboundActivity {
+                frames,
+                bytes,
+                last_payload_len,
+            } => {
+                self.health.record_inbound_frames(frames);
+                self.inbound_bytes_total = self.inbound_bytes_total.saturating_add(bytes);
+                if let Some(len) = last_payload_len {
+                    self.last_inbound_payload_len = Some(len);
+                }
             }
             WebSocketEvent::ServerError {
                 code,
@@ -320,16 +340,22 @@ pub(crate) struct ConnectionEstablished<TR: WsTransport>(
     pub(crate) TR::Writer,
 );
 
+#[derive(Debug)]
+pub struct IngressEmit<M: Send + 'static> {
+    pub message: M,
+}
+
 pub(crate) struct ConnectionFailed {
     pub(crate) error: String,
     pub(crate) status: Option<u16>,
 }
 
-impl<E, R, P, T> KameoMessage<ConnectionEstablished<T>> for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> KameoMessage<ConnectionEstablished<T>> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<()>;
@@ -344,11 +370,12 @@ where
     }
 }
 
-impl<E, R, P, T> KameoMessage<ConnectionFailed> for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> KameoMessage<ConnectionFailed> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<()>;
@@ -363,13 +390,34 @@ where
     }
 }
 
-pub struct GetConnectionStats;
-
-impl<E, R, P, T> KameoMessage<GetConnectionStats> for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> KameoMessage<IngressEmit<E::Message>> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<()>;
+
+    async fn handle(
+        &mut self,
+        msg: IngressEmit<E::Message>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.handle_message_action(WsMessageAction::Process(msg.message))
+            .await
+    }
+}
+
+pub struct GetConnectionStats;
+
+impl<E, R, P, I, T> KameoMessage<GetConnectionStats> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<WsConnectionStats>;
@@ -383,16 +431,19 @@ where
     }
 }
 
-impl<E, R, P, T> WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     async fn stop_all_tasks(&mut self) {
         let _ = self.shutdown_tx.send(true);
-        Self::await_task(&mut self.reader_task).await;
+        if let Some(ingress) = Self::await_reader(&mut self.reader_task).await {
+            self.ingress = Some(ingress);
+        }
         Self::await_task(&mut self.ping_task).await;
         self.teardown_writer().await;
         self.reset_channels();
@@ -400,7 +451,9 @@ where
 
     async fn stop_io_tasks_only(&mut self) {
         let _ = self.shutdown_tx.send(true);
-        Self::await_task(&mut self.reader_task).await;
+        if let Some(ingress) = Self::await_reader(&mut self.reader_task).await {
+            self.ingress = Some(ingress);
+        }
         Self::await_task(&mut self.ping_task).await;
         self.teardown_writer().await;
         self.reset_shutdown_channel();
@@ -410,6 +463,19 @@ where
         if let Some(handle) = handle.take() {
             if let Err(err) = handle.await {
                 warn!("task terminated with error: {err}");
+            }
+        }
+    }
+
+    async fn await_reader(handle: &mut Option<JoinHandle<I>>) -> Option<I> {
+        let Some(handle) = handle.take() else {
+            return None;
+        };
+        match handle.await {
+            Ok(ingress) => Some(ingress),
+            Err(err) => {
+                warn!("reader task terminated with error: {err}");
+                None
             }
         }
     }
@@ -619,7 +685,20 @@ where
 
         let reader_actor_ref = self.actor_ref.clone();
         let reader_connection_label = self.connection_label().to_string();
+        let mut ingress = self
+            .ingress
+            .take()
+            .expect("ingress must be present when establishing connection");
+        ingress.on_open();
         self.reader_task = Some(tokio::spawn(async move {
+            const TOUCH_FRAME_BATCH: u64 = 64;
+            const TOUCH_INTERVAL: Duration = Duration::from_millis(100);
+
+            let mut frames_since_touch: u64 = 0;
+            let mut bytes_since_touch: u64 = 0;
+            let mut last_payload_len: Option<usize> = None;
+            let mut last_touch = Instant::now();
+
             loop {
                 tokio::select! {
                     res = reader_shutdown.changed() => {
@@ -653,31 +732,65 @@ where
                                 break;
                             }
                             Some(Ok(msg)) => {
-                                // Protocol-level ping/pong frames are handled by the ping strategy.
-                                // Uncomment for raw frame logging:
-                                /*
-                                match &msg {
-                                    WsMessage::Ping(_) => {
-                                        let payload_len = message_bytes(&msg).map(|b| b.len());
-                                        info!(
-                                            connection = %reader_connection_label,
-                                            payload_len = payload_len,
-                                            "reader received websocket ping frame"
-                                        );
-                                    }
-                                    WsMessage::Pong(_) => {
-                                        let payload_len = message_bytes(&msg).map(|b| b.len());
-                                        info!(
-                                            connection = %reader_connection_label,
-                                            payload_len = payload_len,
-                                            "reader received websocket pong frame"
-                                        );
-                                    }
-                                    _ => {}
+                                frames_since_touch = frames_since_touch.saturating_add(1);
+                                if let Some(bytes) = message_bytes(&msg) {
+                                    bytes_since_touch = bytes_since_touch.saturating_add(bytes.len() as u64);
+                                    last_payload_len = Some(bytes.len());
                                 }
-                                */
-                                if reader_actor_ref.tell(WebSocketEvent::Inbound(msg)).send().await.is_err() {
-                                    break;
+
+                                match ingress.on_frame(&msg) {
+                                    WsIngressAction::Ignore => {}
+                                    WsIngressAction::Emit(message) => {
+                                        if reader_actor_ref
+                                            .tell(IngressEmit::<E::Message> { message })
+                                            .send()
+                                            .await
+                                            .is_err() {
+                                            break;
+                                        }
+                                    }
+                                    WsIngressAction::Forward(frame) => {
+                                        if reader_actor_ref.tell(WebSocketEvent::Inbound(frame)).send().await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    WsIngressAction::Reconnect(reason) => {
+                                        let _ = reader_actor_ref
+                                            .tell(WebSocketEvent::Disconnect {
+                                                reason: reason.clone(),
+                                                cause: WsDisconnectCause::EndpointRequested { reason },
+                                            })
+                                            .send()
+                                            .await;
+                                        break;
+                                    }
+                                    WsIngressAction::Shutdown(reason) => {
+                                        let _ = reader_actor_ref
+                                            .tell(WebSocketEvent::Disconnect {
+                                                reason: reason.clone(),
+                                                cause: WsDisconnectCause::EndpointRequested { reason },
+                                            })
+                                            .send()
+                                            .await;
+                                        break;
+                                    }
+                                }
+
+                                if frames_since_touch >= TOUCH_FRAME_BATCH || last_touch.elapsed() >= TOUCH_INTERVAL {
+                                    if frames_since_touch != 0 || bytes_since_touch != 0 {
+                                        let _ = reader_actor_ref
+                                            .tell(WebSocketEvent::InboundActivity {
+                                                frames: frames_since_touch,
+                                                bytes: bytes_since_touch,
+                                                last_payload_len,
+                                            })
+                                            .send()
+                                            .await;
+                                        frames_since_touch = 0;
+                                        bytes_since_touch = 0;
+                                        last_payload_len = None;
+                                    }
+                                    last_touch = Instant::now();
                                 }
                             }
                             Some(Err(err)) => {
@@ -703,6 +816,20 @@ where
                     }
                 }
             }
+
+            // Final touch and hand ingress state back to the actor.
+            if frames_since_touch != 0 || bytes_since_touch != 0 {
+                let _ = reader_actor_ref
+                    .tell(WebSocketEvent::InboundActivity {
+                        frames: frames_since_touch,
+                        bytes: bytes_since_touch,
+                        last_payload_len,
+                    })
+                    .send()
+                    .await;
+            }
+
+            ingress
         }));
 
         if self.enable_ping {
@@ -1245,11 +1372,12 @@ where
     }
 }
 
-impl<E, R, P, T> WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     fn connection_label(&self) -> &str {
@@ -1539,6 +1667,12 @@ pub enum WebSocketEvent {
         cause: WsDisconnectCause,
     },
     Inbound(WsMessage),
+    /// Lightweight inbound activity update emitted by the IO loop even when frames are ignored.
+    InboundActivity {
+        frames: u64,
+        bytes: u64,
+        last_payload_len: Option<usize>,
+    },
     SendMessage(WsMessage),
     SendBatch(Vec<WsMessage>),
     ServerError {
@@ -1571,14 +1705,15 @@ where
     pub action: WsSubscriptionAction<M>,
 }
 
-impl<E, R, P, T>
+impl<E, R, P, I, T>
     KameoMessage<
         WsSubscriptionUpdate<<E::Subscription as WsSubscriptionManager>::SubscriptionMessage>,
-    > for WebSocketActor<E, R, P, T>
+    > for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<()>;
@@ -1594,11 +1729,12 @@ where
     }
 }
 
-impl<E, R, P, T> KameoMessage<WaitForWriter> for WebSocketActor<E, R, P, T>
+impl<E, R, P, I, T> KameoMessage<WaitForWriter> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
     type Reply = WebSocketResult<()>;

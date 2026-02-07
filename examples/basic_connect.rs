@@ -101,6 +101,7 @@ async fn main() {
         handler: NoopHandler {
             subs: NoopSubscriptions,
         },
+        ingress: defi_ws::core::ForwardAllIngress,
         ping_strategy: ProtocolPingPong::new(Duration::from_secs(20), Duration::from_secs(30)),
         enable_ping: true,
         stale_threshold: Duration::from_secs(60),
