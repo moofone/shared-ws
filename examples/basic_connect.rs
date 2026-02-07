@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
-    GetConnectionStats, ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig,
-    WebSocketEvent, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler,
-    WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
-    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
+    GetConnectionStats, ProtocolPingPong, WebSocketActor, WebSocketActorArgs,
+    WebSocketBufferConfig, WebSocketEvent, WsDisconnectAction, WsDisconnectCause,
+    WsEndpointHandler, WsErrorAction, WsMessageAction, WsParseOutcome, WsReconnectStrategy,
+    WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
 use kameo::Actor;
 
@@ -111,6 +111,7 @@ async fn main() {
         rate_limiter: None,
         circuit_breaker: None,
         latency_policy: None,
+        payload_latency_sampling: None,
         registration: None,
         metrics: None,
     });

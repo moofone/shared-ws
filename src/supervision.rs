@@ -58,10 +58,8 @@ where
         _actor_ref: WeakActorRef<Self>,
         _id: ActorId,
         _reason: ActorStopReason,
-    ) -> impl std::future::Future<
-        Output = Result<ControlFlow<ActorStopReason>, Self::Error>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<ControlFlow<ActorStopReason>, Self::Error>> + Send
+    {
         async { Ok(ControlFlow::Continue(())) }
     }
 }
-

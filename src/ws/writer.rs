@@ -19,7 +19,10 @@ where
     W: Sink<WsMessage, Error = WebSocketError> + Send + Sync + Unpin + 'static,
 {
     pub fn new(writer: W, shutdown_rx: watch::Receiver<bool>) -> Self {
-        Self { writer, shutdown_rx }
+        Self {
+            writer,
+            shutdown_rx,
+        }
     }
 }
 
@@ -40,8 +43,7 @@ where
         err: kameo::prelude::PanicError,
     ) -> impl std::future::Future<
         Output = Result<std::ops::ControlFlow<kameo::prelude::ActorStopReason>, Self::Error>,
-    > + Send
-    {
+    > + Send {
         async move {
             tracing::error!(error = ?err, "WsWriterActor panicked");
             Ok(std::ops::ControlFlow::Break(

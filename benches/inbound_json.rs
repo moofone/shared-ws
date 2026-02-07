@@ -109,7 +109,9 @@ fn bench_inject_1000_json_frames(c: &mut Criterion) {
                     WsParseOutcome::Message(WsMessageAction::Process(msg)) => {
                         handler.handle_message(msg).unwrap();
                     }
-                    other => { let _ = black_box(other); }
+                    other => {
+                        let _ = black_box(other);
+                    }
                 }
             }
         })

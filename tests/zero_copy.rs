@@ -2,9 +2,9 @@ use bytes::Bytes;
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
-    WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler, WsMessage,
-    WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction, WsTlsConfig,
-    WsSubscriptionManager, WsSubscriptionStatus,
+    WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsMessage,
+    WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
+    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
 use kameo::Actor;
 use std::io;
@@ -148,6 +148,7 @@ async fn inbound_processing_is_zero_copy() {
         rate_limiter: None,
         circuit_breaker: None,
         latency_policy: None,
+        payload_latency_sampling: None,
         registration: None,
         metrics: None,
     });
