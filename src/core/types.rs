@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -40,21 +41,30 @@ pub trait WsIngress: Send + 'static {
 
     fn on_open(&mut self) {}
 
-    fn on_frame(&mut self, frame: &WsFrame) -> WsIngressAction<Self::Message>;
+    fn on_frame(&mut self, frame: WsFrame) -> WsIngressAction<Self::Message>;
 
     fn on_disconnect(&mut self, _cause: &WsDisconnectCause) {}
 }
 
 /// Default ingress that forwards every frame into the actor.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ForwardAllIngress;
+#[derive(Debug, Clone, Copy)]
+pub struct ForwardAllIngress<M = ()>(PhantomData<fn() -> M>);
 
-impl WsIngress for ForwardAllIngress {
-    type Message = ();
+impl<M> Default for ForwardAllIngress<M> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<M> WsIngress for ForwardAllIngress<M>
+where
+    M: Send + 'static,
+{
+    type Message = M;
 
     #[inline]
-    fn on_frame(&mut self, frame: &WsFrame) -> WsIngressAction<Self::Message> {
-        WsIngressAction::Forward(frame.clone())
+    fn on_frame(&mut self, frame: WsFrame) -> WsIngressAction<Self::Message> {
+        WsIngressAction::Forward(frame)
     }
 }
 

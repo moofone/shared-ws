@@ -50,7 +50,7 @@ struct LatencyBreach {
 }
 
 /// Arguments passed when constructing a websocket actor instance.
-pub struct WebSocketActorArgs<E, R, P, I = ForwardAllIngress, T = TungsteniteTransport>
+pub struct WebSocketActorArgs<E, R, P, I = ForwardAllIngress<<E as WsEndpointHandler>::Message>, T = TungsteniteTransport>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
@@ -77,7 +77,7 @@ where
 }
 
 /// Skeleton websocket actor that will be fleshed out in later sprints.
-pub struct WebSocketActor<E, R, P, I = ForwardAllIngress, T = TungsteniteTransport>
+pub struct WebSocketActor<E, R, P, I = ForwardAllIngress<<E as WsEndpointHandler>::Message>, T = TungsteniteTransport>
 where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
@@ -158,16 +158,13 @@ where
         } = args;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let actor_ref = ctx.clone();
         let buffers = WsBufferPool::new(ws_buffers);
 
         if let Some(registration) = registration.as_ref() {
-            let actor_name = registration.name.clone();
+            let actor_name = &registration.name;
             // We only need local discovery for WS pools; distributed registration requires
             // implementing `ActorRegistration`, which we intentionally avoid here.
-            let register_result = ctx.register_local(actor_name.clone());
-
-            match register_result {
+            match ctx.register_local(actor_name.clone()) {
                 Ok(_) => {
                     tracing::debug!(
                         actor = %actor_name,
@@ -183,11 +180,18 @@ where
             }
         }
 
+        // Avoid an extra refcount bump: we can move `ctx` into the actor after registration.
+        let actor_ref = ctx;
+        let writer_ready = Arc::new(Notify::new());
+        let writer_ready_flag = Arc::new(AtomicBool::new(false));
+        let pending_outbound = VecDeque::with_capacity(outbound_capacity);
+        let health = WsHealthMonitor::new(stale_threshold);
+
         Ok(Self {
             url,
             tls,
             transport,
-            health: WsHealthMonitor::new(stale_threshold),
+            health,
             reconnect: reconnect_strategy,
             handler,
             ping: ping_strategy,
@@ -202,8 +206,8 @@ where
             shutdown_rx,
             writer_ref: None,
             writer_supervisor_ref: None,
-            writer_ready: Arc::new(Notify::new()),
-            writer_ready_flag: Arc::new(AtomicBool::new(false)),
+            writer_ready,
+            writer_ready_flag,
             outbound_capacity,
             rate_limiter,
             circuit_breaker,
@@ -213,7 +217,7 @@ where
             registration,
             reconnect_attempt: 0,
             metrics,
-            pending_outbound: VecDeque::with_capacity(outbound_capacity),
+            pending_outbound,
             inbound_bytes_total: 0,
             outbound_bytes_total: 0,
             last_inbound_payload_len: None,
@@ -738,7 +742,7 @@ where
                                     last_payload_len = Some(bytes.len());
                                 }
 
-                                match ingress.on_frame(&msg) {
+                                match ingress.on_frame(msg) {
                                     WsIngressAction::Ignore => {}
                                     WsIngressAction::Emit(message) => {
                                         if reader_actor_ref
