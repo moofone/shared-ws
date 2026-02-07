@@ -35,31 +35,6 @@ impl WsFrame {
     pub fn close(code: u16, reason: Bytes) -> Self {
         Self::Close(Some(WsCloseFrame { code, reason }))
     }
-
-    #[inline]
-    pub fn is_text(&self) -> bool {
-        matches!(self, WsFrame::Text(_))
-    }
-
-    #[inline]
-    pub fn is_binary(&self) -> bool {
-        matches!(self, WsFrame::Binary(_))
-    }
-
-    #[inline]
-    pub fn is_ping(&self) -> bool {
-        matches!(self, WsFrame::Ping(_))
-    }
-
-    #[inline]
-    pub fn is_pong(&self) -> bool {
-        matches!(self, WsFrame::Pong(_))
-    }
-
-    #[inline]
-    pub fn is_close(&self) -> bool {
-        matches!(self, WsFrame::Close(_))
-    }
 }
 
 /// Borrow the underlying bytes from frames without allocation.
