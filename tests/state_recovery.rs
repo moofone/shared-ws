@@ -79,9 +79,10 @@ async fn spawn_ws_server(mode: ServerMode) -> (SocketAddr, mpsc::UnboundedReceiv
                                         let _ = tx.send(ServerEvent::Data { conn_id, bytes });
                                     }
                                     Ok(WsMessage::Text(text)) => {
+                                        // Zero-copy: tungstenite text frames are backed by refcounted bytes.
                                         let _ = tx.send(ServerEvent::Data {
                                             conn_id,
-                                            bytes: Bytes::copy_from_slice(text.as_ref()),
+                                            bytes: text.clone(),
                                         });
                                     }
                                     Ok(WsMessage::Close(_)) => break,
@@ -104,9 +105,10 @@ async fn spawn_ws_server(mode: ServerMode) -> (SocketAddr, mpsc::UnboundedReceiv
                                 let _ = tx.send(ServerEvent::Data { conn_id, bytes });
                             }
                             Ok(WsMessage::Text(text)) => {
+                                // Zero-copy: tungstenite text frames are backed by refcounted bytes.
                                 let _ = tx.send(ServerEvent::Data {
                                     conn_id,
-                                    bytes: Bytes::copy_from_slice(text.as_ref()),
+                                    bytes: text.clone(),
                                 });
                             }
                             Ok(WsMessage::Close(_)) => break,

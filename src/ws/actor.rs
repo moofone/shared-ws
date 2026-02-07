@@ -5,10 +5,6 @@
 
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -103,8 +99,7 @@ where
     shutdown_rx: watch::Receiver<bool>,
     pub writer_ref: Option<ActorRef<WsWriterActor<T::Writer>>>,
     writer_supervisor_ref: Option<ActorRef<TypedSupervisor<WsWriterActor<T::Writer>>>>,
-    writer_ready: Arc<Notify>,
-    writer_ready_flag: Arc<AtomicBool>,
+    writer_ready: Notify,
     pub outbound_capacity: usize,
     pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
@@ -182,8 +177,6 @@ where
 
         // Avoid an extra refcount bump: we can move `ctx` into the actor after registration.
         let actor_ref = ctx;
-        let writer_ready = Arc::new(Notify::new());
-        let writer_ready_flag = Arc::new(AtomicBool::new(false));
         let pending_outbound = VecDeque::with_capacity(outbound_capacity);
         let health = WsHealthMonitor::new(stale_threshold);
 
@@ -206,8 +199,7 @@ where
             shutdown_rx,
             writer_ref: None,
             writer_supervisor_ref: None,
-            writer_ready,
-            writer_ready_flag,
+            writer_ready: Notify::new(),
             outbound_capacity,
             rate_limiter,
             circuit_breaker,
@@ -490,8 +482,6 @@ where
         self.shutdown_rx = shutdown_rx;
         self.writer_ref = None;
         self.pending_outbound.clear();
-        self.writer_ready = Arc::new(Notify::new());
-        self.writer_ready_flag.store(false, Ordering::Release);
     }
 
     fn reset_shutdown_channel(&mut self) {
@@ -682,7 +672,6 @@ where
         let writer =
             spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
         self.writer_ref = Some(writer);
-        self.writer_ready_flag.store(true, Ordering::Release);
         self.writer_ready.notify_waiters();
 
         self.handler.on_open();
@@ -1092,9 +1081,7 @@ where
     }
 
     async fn emit_ping(&mut self) -> WebSocketResult<()> {
-        if self.status != WsConnectionStatus::Connected
-            || !self.writer_ready_flag.load(Ordering::Acquire)
-        {
+        if self.status != WsConnectionStatus::Connected || self.writer_ref.is_none() {
             info!(
                 connection = %self.connection_label(),
                 status = ?self.status,
@@ -1748,18 +1735,43 @@ where
         msg: WaitForWriter,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.writer_ready_flag.load(Ordering::Acquire) || self.writer_ref.is_some() {
+        if self.writer_ref.is_some() {
             return Ok(());
         }
-        match tokio::time::timeout(msg.timeout, self.writer_ready.notified()).await {
-            Ok(_) => Ok(()),
-            Err(_) => Err(WebSocketError::Timeout {
-                context: format!(
-                    "writer not ready for {} within {:?}",
-                    self.connection_label(),
-                    msg.timeout
-                ),
-            }),
+
+        let deadline = Instant::now() + msg.timeout;
+        loop {
+            if self.writer_ref.is_some() {
+                return Ok(());
+            }
+
+            // Subscribe first, then re-check to avoid missing a notify between check and await.
+            let notified = self.writer_ready.notified();
+            if self.writer_ref.is_some() {
+                return Ok(());
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(WebSocketError::Timeout {
+                    context: format!(
+                        "writer not ready for {} within {:?}",
+                        self.connection_label(),
+                        msg.timeout
+                    ),
+                });
+            }
+
+            let remaining = deadline.duration_since(now);
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return Err(WebSocketError::Timeout {
+                    context: format!(
+                        "writer not ready for {} within {:?}",
+                        self.connection_label(),
+                        msg.timeout
+                    ),
+                });
+            }
         }
     }
 }
