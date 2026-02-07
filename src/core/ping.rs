@@ -246,7 +246,11 @@ mod tests {
                 let key = format!("req-{id}");
                 (Bytes::from(key.clone()), key)
             },
-            |bytes: &Bytes| std::str::from_utf8(bytes.as_ref()).ok().map(|s| s.to_string()),
+            |bytes: &Bytes| {
+                std::str::from_utf8(bytes.as_ref())
+                    .ok()
+                    .map(|s| s.to_string())
+            },
         )
         .with_max_pending(1);
 
@@ -289,7 +293,11 @@ mod tests {
                 let key = format!("req-{id}");
                 (Bytes::from(key.clone()), key)
             },
-            |bytes: &Bytes| std::str::from_utf8(bytes.as_ref()).ok().map(|s| s.to_string()),
+            |bytes: &Bytes| {
+                std::str::from_utf8(bytes.as_ref())
+                    .ok()
+                    .map(|s| s.to_string())
+            },
         );
 
         let _ = strategy.create_ping();
@@ -308,4 +316,3 @@ mod tests {
         assert!(strategy.oldest_pending.is_none());
     }
 }
-

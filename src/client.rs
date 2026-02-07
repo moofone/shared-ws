@@ -9,11 +9,13 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, accept_async as tungstenite_accept,
     connect_async as tungstenite_connect, connect_async_tls_with_config as tungstenite_connect_tls,
     tungstenite::protocol::WebSocketConfig,
-    tungstenite::{Message as TungsteniteMessage, Utf8Bytes, protocol::CloseFrame as TungCloseFrame},
+    tungstenite::{
+        Message as TungsteniteMessage, Utf8Bytes, protocol::CloseFrame as TungCloseFrame,
+    },
 };
 
-use crate::tls::install_rustls_crypto_provider;
 use crate::core::{WebSocketError, WsCloseFrame, WsFrame};
+use crate::tls::install_rustls_crypto_provider;
 
 fn map_ws_error(context: &'static str, err: impl ToString) -> WebSocketError {
     WebSocketError::TransportError {
@@ -56,7 +58,9 @@ fn frame_to_msg(frame: WsFrame) -> TungsteniteMessage {
         WsFrame::Text(bytes) => {
             // Bulletproof: avoid UB even if callers misuse WsFrame::Text.
             match std::str::from_utf8(bytes.as_ref()) {
-                Ok(_) => TungsteniteMessage::Text(unsafe { Utf8Bytes::from_bytes_unchecked(bytes) }),
+                Ok(_) => {
+                    TungsteniteMessage::Text(unsafe { Utf8Bytes::from_bytes_unchecked(bytes) })
+                }
                 Err(_) => TungsteniteMessage::Binary(bytes),
             }
         }

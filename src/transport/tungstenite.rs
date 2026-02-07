@@ -6,13 +6,11 @@ use bytes::Bytes;
 use futures_util::{Future, Sink, Stream, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream,
-    connect_async as tungstenite_connect,
+    Connector, MaybeTlsStream, WebSocketStream, connect_async as tungstenite_connect,
     connect_async_tls_with_config as tungstenite_connect_tls,
     tungstenite::{
-        Message as TungsteniteMessage,
+        Message as TungsteniteMessage, Utf8Bytes,
         protocol::{CloseFrame as TungCloseFrame, WebSocketConfig},
-        Utf8Bytes,
     },
 };
 
@@ -68,9 +66,7 @@ fn frame_to_msg(frame: WsFrame) -> TungsteniteMessage {
         WsFrame::Binary(bytes) => TungsteniteMessage::Binary(bytes),
         WsFrame::Ping(bytes) => TungsteniteMessage::Ping(bytes),
         WsFrame::Pong(bytes) => TungsteniteMessage::Pong(bytes),
-        WsFrame::Close(frame) => {
-            TungsteniteMessage::Close(frame.map(core_to_close))
-        }
+        WsFrame::Close(frame) => TungsteniteMessage::Close(frame.map(core_to_close)),
     }
 }
 
@@ -98,10 +94,7 @@ pub struct TungsteniteReader {
 impl Stream for TungsteniteReader {
     type Item = Result<WsFrame, WebSocketError>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(msg_to_frame(msg)))),
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(map_ws_error("read", err)))),
@@ -112,16 +105,16 @@ impl Stream for TungsteniteReader {
 }
 
 pub struct TungsteniteWriter {
-    inner: futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, TungsteniteMessage>,
+    inner: futures_util::stream::SplitSink<
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        TungsteniteMessage,
+    >,
 }
 
 impl Sink<WsFrame> for TungsteniteWriter {
     type Error = WebSocketError;
 
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner)
             .poll_ready(cx)
             .map_err(|e| map_ws_error("write", e))
@@ -133,19 +126,13 @@ impl Sink<WsFrame> for TungsteniteWriter {
             .map_err(|e| map_ws_error("write", e))
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner)
             .poll_flush(cx)
             .map_err(|e| map_ws_error("write", e))
     }
 
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner)
             .poll_close(cx)
             .map_err(|e| map_ws_error("write", e))
@@ -178,16 +165,14 @@ impl WsTransport for TungsteniteTransport {
             let disable_tls_validation = !tls.validate_certs;
 
             let (stream, _) = match connector {
-                Some(connector) => {
-                    tungstenite_connect_tls(
-                        url.clone(),
-                        Some(config),
-                        disable_tls_validation,
-                        Some(connector),
-                    )
-                    .await
-                    .map_err(|e| map_ws_error("connect", e))?
-                }
+                Some(connector) => tungstenite_connect_tls(
+                    url.clone(),
+                    Some(config),
+                    disable_tls_validation,
+                    Some(connector),
+                )
+                .await
+                .map_err(|e| map_ws_error("connect", e))?,
                 None => {
                     // For ws://, use connect_async; for wss://, connect_async_tls_with_config works too.
                     match tungstenite_connect(url.clone()).await {
@@ -211,8 +196,6 @@ impl WsTransport for TungsteniteTransport {
 }
 
 /// Accept an incoming websocket connection and return a client wrapper used by tests/examples.
-pub async fn accept_async(
-    stream: TcpStream,
-) -> Result<crate::client::WsClient, WebSocketError> {
+pub async fn accept_async(stream: TcpStream) -> Result<crate::client::WsClient, WebSocketError> {
     crate::client::accept_async(stream).await
 }

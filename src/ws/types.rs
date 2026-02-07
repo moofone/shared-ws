@@ -4,4 +4,3 @@
 //! moving the canonical definitions to `crate::core`.
 
 pub use crate::core::types::*;
-

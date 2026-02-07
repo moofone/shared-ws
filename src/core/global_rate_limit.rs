@@ -120,8 +120,7 @@ impl KameoMessage<SetProviderLimit> for WsGlobalRateLimiterActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let cfg = WsRateLimitConfig::new(msg.max_per_window, msg.window);
-        self.providers
-            .insert(msg.provider, ProviderState::new(cfg));
+        self.providers.insert(msg.provider, ProviderState::new(cfg));
         Ok(())
     }
 }
@@ -167,13 +166,15 @@ impl KameoMessage<AcquirePermits> for WsGlobalRateLimiterActor {
 }
 
 /// Spawn a per-crate supervisor for global rate limiters.
-pub fn spawn_global_rate_limiter_supervisor(
-) -> ActorRef<TypedSupervisor<WsGlobalRateLimiterActor>> {
+pub fn spawn_global_rate_limiter_supervisor() -> ActorRef<TypedSupervisor<WsGlobalRateLimiterActor>>
+{
     TypedSupervisor::spawn(TypedSupervisor::new(
         "shared-ws-global-rate-limiter",
         None,
         |_name| -> ActorRef<WsGlobalRateLimiterActor> {
-            unreachable!("WsGlobalRateLimiterActor restart unsupported; must be explicitly recreated")
+            unreachable!(
+                "WsGlobalRateLimiterActor restart unsupported; must be explicitly recreated"
+            )
         },
     ))
 }
@@ -238,7 +239,10 @@ mod tests {
         assert!(
             matches!(
                 third,
-                Err(SendError::HandlerError(WebSocketError::RateLimited { retry_after: Some(_), .. }))
+                Err(SendError::HandlerError(WebSocketError::RateLimited {
+                    retry_after: Some(_),
+                    ..
+                }))
             ),
             "expected global rate limit to apply across clients, got {third:?}"
         );

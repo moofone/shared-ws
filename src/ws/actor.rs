@@ -23,18 +23,18 @@ use super::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
 use super::types::{
     ForwardAllIngress, WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration,
     WsBufferPool, WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
-    WsErrorAction, WsEndpointHandler, WsIngress, WsIngressAction, WsLatencyPercentile,
-    WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsReconnectStrategy,
-    WsSubscriptionAction, WsSubscriptionManager, WsTlsConfig, WsSubscriptionStatus, into_ws_message,
-    message_bytes,
+    WsEndpointHandler, WsErrorAction, WsIngress, WsIngressAction, WsLatencyPercentile,
+    WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsPayloadLatencySamplingConfig,
+    WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
+    WsTlsConfig, into_ws_message, message_bytes,
+};
+use super::writer::{
+    WriterWrite, WsWriterActor, spawn_writer_supervised_with, spawn_writer_supervisor,
 };
 use crate::core::global_rate_limit::{AcquirePermits, WsGlobalRateLimitHandle};
-use super::writer::{
-    WriterWrite, WsWriterActor, spawn_writer_supervisor, spawn_writer_supervised_with,
-};
+use crate::supervision::TypedSupervisor;
 use crate::transport::WsTransport;
 use crate::transport::tungstenite::TungsteniteTransport;
-use crate::supervision::TypedSupervisor;
 use kameo::error::RegistryError;
 use kameo::prelude::{Actor, ActorRef, Context, Message as KameoMessage, WeakActorRef};
 
@@ -47,8 +47,13 @@ struct LatencyBreach {
 }
 
 /// Arguments passed when constructing a websocket actor instance.
-pub struct WebSocketActorArgs<E, R, P, I = ForwardAllIngress<<E as WsEndpointHandler>::Message>, T = TungsteniteTransport>
-where
+pub struct WebSocketActorArgs<
+    E,
+    R,
+    P,
+    I = ForwardAllIngress<<E as WsEndpointHandler>::Message>,
+    T = TungsteniteTransport,
+> where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
@@ -71,13 +76,22 @@ where
     pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
+    /// Opt-in distributed instrumentation: sample payload timestamp lag at low frequency.
+    ///
+    /// Effective only if `metrics` is also set.
+    pub payload_latency_sampling: Option<WsPayloadLatencySamplingConfig>,
     pub registration: Option<WsActorRegistration>,
     pub metrics: Option<WsMetricsHook>,
 }
 
 /// Skeleton websocket actor that will be fleshed out in later sprints.
-pub struct WebSocketActor<E, R, P, I = ForwardAllIngress<<E as WsEndpointHandler>::Message>, T = TungsteniteTransport>
-where
+pub struct WebSocketActor<
+    E,
+    R,
+    P,
+    I = ForwardAllIngress<<E as WsEndpointHandler>::Message>,
+    T = TungsteniteTransport,
+> where
     E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
@@ -112,6 +126,8 @@ where
     pub latency_policy: Option<WsLatencyPolicy>,
     pub latency_breach_streak: u32,
     pub status: WsConnectionStatus,
+    payload_latency_sampling: Option<WsPayloadLatencySamplingConfig>,
+    next_payload_latency_sample_at: Instant,
     pub registration: Option<WsActorRegistration>,
     pub reconnect_attempt: u64,
     pub metrics: Option<WsMetricsHook>,
@@ -155,6 +171,7 @@ where
             rate_limiter,
             circuit_breaker,
             latency_policy,
+            payload_latency_sampling,
             registration,
             metrics,
         } = args;
@@ -216,6 +233,8 @@ where
             latency_policy,
             latency_breach_streak: 0,
             status: WsConnectionStatus::Connecting,
+            payload_latency_sampling,
+            next_payload_latency_sample_at: Instant::now(),
             registration,
             reconnect_attempt: 0,
             metrics,
@@ -517,9 +536,7 @@ where
     async fn teardown_writer(&mut self) {
         let writer = self.writer_ref.take();
 
-        if let (Some(writer), Some(supervisor)) =
-            (&writer, self.writer_supervisor_ref.as_ref())
-        {
+        if let (Some(writer), Some(supervisor)) = (&writer, self.writer_supervisor_ref.as_ref()) {
             let _ = writer.stop_gracefully().await;
             writer.wait_for_shutdown().await;
             writer.unlink(supervisor).await;
@@ -693,8 +710,7 @@ where
             .writer_supervisor_ref
             .as_ref()
             .expect("writer supervisor must be set");
-        let writer =
-            spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
+        let writer = spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
         self.writer_ref = Some(writer);
         self.writer_ready.notify_waiters();
 
@@ -1090,9 +1106,8 @@ where
         message: WsMessage,
     ) -> WebSocketResult<()> {
         if let Some(bytes) = message_bytes(&message) {
-            self.outbound_bytes_total = self
-                .outbound_bytes_total
-                .saturating_add(bytes.len() as u64);
+            self.outbound_bytes_total =
+                self.outbound_bytes_total.saturating_add(bytes.len() as u64);
             self.last_outbound_payload_len = Some(bytes.len());
         }
         match writer.tell(WriterWrite { message }).send().await {
@@ -1188,9 +1203,7 @@ where
         self.health.record_message();
         let payload_len = message_bytes(&message).map(|bytes| bytes.len());
         if let Some(bytes_len) = payload_len {
-            self.inbound_bytes_total = self
-                .inbound_bytes_total
-                .saturating_add(bytes_len as u64);
+            self.inbound_bytes_total = self.inbound_bytes_total.saturating_add(bytes_len as u64);
             self.last_inbound_payload_len = Some(bytes_len);
         }
         // Protocol-level ping/pong frames are handled by the ping strategy.
@@ -1325,6 +1338,43 @@ where
                 }
             }
             Ok(WsParseOutcome::Message(action)) => {
+                // Opt-in distributed instrumentation: sample payload timestamp lag at low
+                // frequency, and only if a metrics hook is configured.
+                if let (Some(cfg), Some(metrics)) =
+                    (self.payload_latency_sampling, self.metrics.as_ref())
+                {
+                    if cfg.interval > Duration::from_secs(0) {
+                        let now = Instant::now();
+                        if now >= self.next_payload_latency_sample_at {
+                            self.next_payload_latency_sample_at = now + cfg.interval;
+                            if let Some(now_epoch_us) =
+                                WsPayloadLatencySamplingConfig::now_epoch_us()
+                            {
+                                // Split field borrows: we want an immutable connection id while
+                                // mutably borrowing the handler.
+                                let connection = self
+                                    .registration
+                                    .as_ref()
+                                    .map(|r| r.name.as_str())
+                                    .unwrap_or(self.url.as_str());
+
+                                self.handler.sample_payload_timestamps_us(
+                                    bytes,
+                                    &mut |kind, payload_ts_us| {
+                                        let lag_us = now_epoch_us.saturating_sub(payload_ts_us);
+                                        if lag_us >= 0 {
+                                            metrics.observe_payload_lag_us(
+                                                connection,
+                                                kind,
+                                                lag_us as u64,
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
                 self.handle_message_action(action).await?;
             }
             Err(err) => {

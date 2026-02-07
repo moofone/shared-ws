@@ -81,7 +81,10 @@ pub enum WebSocketError {
     SubscriptionFailed { message: String, channel: String },
 
     #[error("Transport error ({context}): {error}")]
-    TransportError { context: &'static str, error: String },
+    TransportError {
+        context: &'static str,
+        error: String,
+    },
 
     #[error("Parse failed: {0}")]
     ParseFailed(String),
@@ -333,6 +336,39 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
     fn classify_disconnect(&self, cause: &WsDisconnectCause) -> WsDisconnectAction;
 
     fn on_open(&mut self) {}
+
+    /// Optional instrumentation hook: emit payload-provided timestamps for distributed lag metrics.
+    ///
+    /// This is called only when the websocket actor's payload latency sampling is enabled and a
+    /// sample is due. Emit timestamps as **Unix epoch microseconds**.
+    ///
+    /// `kind` should be a stable identifier (e.g. `"event_time"`, `"sent_at"`, `"exchange_ts"`).
+    /// The actor will compute `now_us - ts_us` and forward the lag to the configured metrics hook.
+    #[inline]
+    fn sample_payload_timestamps_us(
+        &mut self,
+        _data: &[u8],
+        _emit: &mut dyn FnMut(&'static str, i64),
+    ) {
+    }
+}
+
+/// Configuration for opt-in payload timestamp lag sampling.
+#[derive(Clone, Copy, Debug)]
+pub struct WsPayloadLatencySamplingConfig {
+    /// Minimum time between samples. Typical values are 5-30s.
+    pub interval: Duration,
+}
+
+impl WsPayloadLatencySamplingConfig {
+    /// Best-effort current time as Unix epoch microseconds.
+    #[inline]
+    pub fn now_epoch_us() -> Option<i64> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let dur = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let us = dur.as_micros().min(i64::MAX as u128) as i64;
+        Some(us)
+    }
 }
 
 /// Recovery actions produced when a server or internal error is encountered.

@@ -215,6 +215,9 @@ mod tests {
         let mut monitor = WsHealthMonitor::new(Duration::from_secs(5));
         let huge = "x".repeat(MAX_ERROR_TEXT_BYTES + 10);
         monitor.record_server_error(None, &huge);
-        assert_eq!(monitor.server_errors.front().unwrap()._message.len(), MAX_ERROR_TEXT_BYTES);
+        assert_eq!(
+            monitor.server_errors.front().unwrap()._message.len(),
+            MAX_ERROR_TEXT_BYTES
+        );
     }
 }

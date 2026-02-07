@@ -10,9 +10,9 @@ use defi_ws::client::accept_async;
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
-    WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler,
-    WsMessage, WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
-    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
+    WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction,
+    WsMessage, WsMessageAction, WsParseOutcome, WsPingPongStrategy, WsReconnectStrategy,
+    WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
 use kameo::Actor;
 use tokio::net::TcpListener;
@@ -221,6 +221,36 @@ impl WsReconnectStrategy for FastReconnect {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NoopPing {
+    interval: Duration,
+}
+
+impl WsPingPongStrategy for NoopPing {
+    fn create_ping(&mut self) -> Option<defi_ws::core::WsFrame> {
+        None
+    }
+
+    fn handle_inbound(&mut self, _message: &defi_ws::core::WsFrame) -> defi_ws::core::WsPongResult {
+        defi_ws::core::WsPongResult::NotPong
+    }
+
+    fn is_stale(&self) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {}
+
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn timeout(&self) -> Duration {
+        // Irrelevant: this strategy never creates pings or marks itself stale.
+        Duration::from_secs(365 * 24 * 60 * 60)
+    }
+}
+
 impl WsEndpointHandler for RecordingHandler {
     type Message = ();
     type Error = std::io::Error;
@@ -307,8 +337,8 @@ async fn collect_data_for_conn(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actor_state_survives_remote_close_and_resubscribes() {
-    let (addr, mut rx) = spawn_ws_server(ServerMode::CloseAfterDelay(Duration::from_millis(75)))
-        .await;
+    let (addr, mut rx) =
+        spawn_ws_server(ServerMode::CloseAfterDelay(Duration::from_millis(75))).await;
 
     let counters = Arc::new(Counters::default());
     let handler = RecordingHandler::new(counters.clone(), vec![b"sub0".to_vec()]);
@@ -331,6 +361,7 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
         rate_limiter: None,
         circuit_breaker: None,
         latency_policy: None,
+        payload_latency_sampling: None,
         registration: None,
         metrics: None,
     });
@@ -399,6 +430,7 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
         rate_limiter: None,
         circuit_breaker: None,
         latency_policy: None,
+        payload_latency_sampling: None,
         registration: None,
         metrics: None,
     });
@@ -430,4 +462,53 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
     assert_eq!(counters.opens.load(Ordering::Acquire), 2);
     assert_eq!(counters.resets.load(Ordering::Acquire), 0);
     assert_eq!(counters.desired_len.load(Ordering::Acquire), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_reconnects_when_no_inbound_data_for_2s() {
+    let (addr, mut rx) = spawn_ws_server(ServerMode::RespondToPings).await;
+
+    let counters = Arc::new(Counters::default());
+    // Keep initial subscriptions non-empty so we can deterministically observe "connection fully up"
+    // via an outbound message on each connect, without requiring any inbound traffic.
+    let handler = RecordingHandler::new(counters.clone(), vec![b"sub0".to_vec()]);
+
+    let actor = WebSocketActor::spawn(WebSocketActorArgs {
+        url: format!("ws://{}", addr),
+        tls: WsTlsConfig::default(),
+        transport: TungsteniteTransport::default(),
+        reconnect_strategy: FastReconnect {
+            delay: Duration::from_millis(10),
+        },
+        handler,
+        ingress: defi_ws::core::ForwardAllIngress::default(),
+        // Enable the ping loop so it drives `CheckStale`, but avoid emitting pings:
+        // we want to test stale inbound data, not stale ping/pong.
+        ping_strategy: NoopPing {
+            interval: Duration::from_millis(200),
+        },
+        enable_ping: true,
+        stale_threshold: Duration::from_secs(2),
+        ws_buffers: WebSocketBufferConfig::default(),
+        global_rate_limit: None,
+        outbound_capacity: 32,
+        rate_limiter: None,
+        circuit_breaker: None,
+        latency_policy: None,
+        payload_latency_sampling: None,
+        registration: None,
+        metrics: None,
+    });
+
+    actor.tell(WebSocketEvent::Connect).send().await.unwrap();
+
+    let first = next_connection(&mut rx, Duration::from_secs(2)).await;
+    let first_msgs = collect_data_for_conn(&mut rx, first, 1, Duration::from_secs(2)).await;
+    assert_eq!(first_msgs[0].as_ref(), b"sub0");
+
+    let second = next_connection(&mut rx, Duration::from_secs(6)).await;
+    let second_msgs = collect_data_for_conn(&mut rx, second, 1, Duration::from_secs(2)).await;
+    assert_eq!(second_msgs[0].as_ref(), b"sub0");
+
+    assert_eq!(counters.opens.load(Ordering::Acquire), 2);
 }
