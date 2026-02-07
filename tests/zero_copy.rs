@@ -143,6 +143,7 @@ async fn inbound_processing_is_zero_copy() {
         enable_ping: true,
         stale_threshold: Duration::from_secs(30),
         ws_buffers: WebSocketBufferConfig::default(),
+        global_rate_limit: None,
         outbound_capacity: 8,
         rate_limiter: None,
         circuit_breaker: None,

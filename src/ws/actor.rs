@@ -28,6 +28,7 @@ use super::types::{
     WsSubscriptionAction, WsSubscriptionManager, WsTlsConfig, WsSubscriptionStatus, into_ws_message,
     message_bytes,
 };
+use crate::core::global_rate_limit::{AcquirePermits, WsGlobalRateLimitHandle};
 use super::writer::{
     WriterWrite, WsWriterActor, spawn_writer_supervisor, spawn_writer_supervised_with,
 };
@@ -65,6 +66,8 @@ where
     pub stale_threshold: Duration,
     pub ws_buffers: WebSocketBufferConfig,
     pub outbound_capacity: usize,
+    /// Optional global per-provider outbound rate limiter (send-side only).
+    pub global_rate_limit: Option<WsGlobalRateLimitHandle>,
     pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
@@ -101,6 +104,9 @@ where
     writer_supervisor_ref: Option<ActorRef<TypedSupervisor<WsWriterActor<T::Writer>>>>,
     writer_ready: Notify,
     pub outbound_capacity: usize,
+    pub global_rate_limit: Option<WsGlobalRateLimitHandle>,
+    global_permits: u32,
+    outbound_drain_scheduled_at: Option<Instant>,
     pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
@@ -145,6 +151,7 @@ where
             stale_threshold,
             ws_buffers,
             outbound_capacity,
+            global_rate_limit,
             rate_limiter,
             circuit_breaker,
             latency_policy,
@@ -201,6 +208,9 @@ where
             writer_supervisor_ref: None,
             writer_ready: Notify::new(),
             outbound_capacity,
+            global_rate_limit,
+            global_permits: 0,
+            outbound_drain_scheduled_at: None,
             rate_limiter,
             circuit_breaker,
             latency_policy,
@@ -322,6 +332,17 @@ where
                         self.handle_disconnect(reason, cause).await?;
                         break;
                     }
+                }
+            }
+            WebSocketEvent::DrainOutbound => {
+                self.outbound_drain_scheduled_at = None;
+                if let Err(err) = self.drain_pending_outbound().await {
+                    let reason = format!("outbound drain failed: {err}");
+                    let cause = WsDisconnectCause::InternalError {
+                        context: "outbound_drain".to_string(),
+                        error: err.to_string(),
+                    };
+                    self.handle_disconnect(reason, cause).await?;
                 }
             }
             WebSocketEvent::ResetState => self.handler.reset_state(),
@@ -482,6 +503,9 @@ where
         self.shutdown_rx = shutdown_rx;
         self.writer_ref = None;
         self.pending_outbound.clear();
+        self.writer_ready = Notify::new();
+        self.outbound_drain_scheduled_at = None;
+        self.global_permits = 0;
     }
 
     fn reset_shutdown_channel(&mut self) {
@@ -959,32 +983,6 @@ where
     }
 
     async fn enqueue_message(&mut self, message: WsMessage) -> WebSocketResult<()> {
-        if let Some(limiter) = self.rate_limiter.as_mut() {
-            limiter.try_acquire()?;
-        }
-
-        if let Some(writer) = self.writer_ref.clone() {
-            if let Err(err) = self.drain_pending_outbound().await {
-                let reason = format!("outbound drain failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "outbound_drain".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                return Ok(());
-            }
-            if let Err(err) = self.send_with_writer(writer, message).await {
-                let reason = format!("outbound send failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "outbound_send".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                return Ok(());
-            }
-            return Ok(());
-        }
-
         if self.pending_outbound.len() >= self.outbound_capacity {
             self.health
                 .record_internal_error("outbound", "pending queue full");
@@ -992,7 +990,7 @@ where
         }
 
         self.pending_outbound.push_back(message);
-        Ok(())
+        self.drain_pending_outbound().await
     }
 
     async fn drain_pending_outbound(&mut self) -> WebSocketResult<()> {
@@ -1004,7 +1002,24 @@ where
             return Ok(());
         };
 
-        while let Some(queued) = self.pending_outbound.pop_front() {
+        while !self.pending_outbound.is_empty() {
+            match self.acquire_outbound_permit().await {
+                Ok(()) => {}
+                Err(WebSocketError::RateLimited { retry_after, .. }) => {
+                    if let Some(delay) = retry_after {
+                        self.schedule_outbound_drain(delay);
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                Err(other) => return Err(other),
+            }
+
+            // Permit acquired; now we can pop and send.
+            let queued = self
+                .pending_outbound
+                .pop_front()
+                .expect("front just existed");
             if let Err(err) = self.send_with_writer(writer.clone(), queued).await {
                 self.pending_outbound.clear();
                 let reason = format!("outbound drain failed: {err}");
@@ -1017,6 +1032,56 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn acquire_outbound_permit(&mut self) -> WebSocketResult<()> {
+        // Global per-provider limiter: request permits in batches to amortize actor messaging.
+        if let Some(handle) = self.global_rate_limit.as_ref() {
+            if self.global_permits == 0 {
+                let reply = handle
+                    .limiter
+                    .ask(AcquirePermits {
+                        provider: handle.provider.clone(),
+                        permits: handle.batch,
+                    })
+                    .await
+                    .map_err(|err| match err {
+                        kameo::error::SendError::HandlerError(err) => err,
+                        other => WebSocketError::ActorError(other.to_string()),
+                    })?;
+                self.global_permits = reply.permits;
+            }
+            if self.global_permits == 0 {
+                return Err(WebSocketError::RateLimited {
+                    message: "rate limit exceeded".to_string(),
+                    retry_after: Some(Duration::from_millis(1)),
+                });
+            }
+            self.global_permits = self.global_permits.saturating_sub(1);
+            return Ok(());
+        }
+
+        // Local per-actor limiter (legacy / fallback).
+        if let Some(limiter) = self.rate_limiter.as_mut() {
+            limiter.try_acquire()?;
+        }
+        Ok(())
+    }
+
+    fn schedule_outbound_drain(&mut self, delay: Duration) {
+        let now = Instant::now();
+        let when = now + delay;
+        if let Some(existing) = self.outbound_drain_scheduled_at {
+            if existing <= when {
+                return;
+            }
+        }
+        self.outbound_drain_scheduled_at = Some(when);
+        let actor_ref = self.actor_ref.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = actor_ref.tell(WebSocketEvent::DrainOutbound).send().await;
+        });
     }
 
     async fn send_with_writer(
@@ -1666,6 +1731,8 @@ pub enum WebSocketEvent {
     },
     SendMessage(WsMessage),
     SendBatch(Vec<WsMessage>),
+    /// Attempt to drain any queued outbound messages (used for rate-limit retries).
+    DrainOutbound,
     ServerError {
         code: Option<i32>,
         message: String,

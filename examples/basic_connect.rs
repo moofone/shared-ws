@@ -106,6 +106,7 @@ async fn main() {
         enable_ping: true,
         stale_threshold: Duration::from_secs(60),
         ws_buffers: WebSocketBufferConfig::default(),
+        global_rate_limit: None,
         outbound_capacity: 128,
         rate_limiter: None,
         circuit_breaker: None,
