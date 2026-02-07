@@ -3,7 +3,7 @@ use std::time::Duration;
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
     GetConnectionStats, ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig,
-    WebSocketEvent, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsExchangeHandler,
+    WebSocketEvent, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
     WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
@@ -53,7 +53,7 @@ struct NoopHandler {
     subs: NoopSubscriptions,
 }
 
-impl WsExchangeHandler for NoopHandler {
+impl WsEndpointHandler for NoopHandler {
     type Message = ();
     type Error = std::io::Error;
     type Subscription = NoopSubscriptions;

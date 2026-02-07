@@ -13,7 +13,7 @@ pub enum WsPongResult {
     Reply(WsFrame),
 }
 
-/// Ping/pong handling contract for exchange adapters.
+/// Ping/pong handling contract for endpoint adapters.
 pub trait WsPingPongStrategy: Send + Sync + 'static {
     fn create_ping(&mut self) -> Option<WsFrame>;
     fn handle_inbound(&mut self, message: &WsFrame) -> WsPongResult;

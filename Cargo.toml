@@ -19,4 +19,9 @@ tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots",
 tracing = "0.1"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "inbound_json"
+harness = false

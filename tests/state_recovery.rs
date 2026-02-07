@@ -10,7 +10,7 @@ use defi_ws::client::accept_async;
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
-    WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsExchangeHandler,
+    WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler,
     WsMessage, WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
     WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
@@ -219,7 +219,7 @@ impl WsReconnectStrategy for FastReconnect {
     }
 }
 
-impl WsExchangeHandler for RecordingHandler {
+impl WsEndpointHandler for RecordingHandler {
     type Message = ();
     type Error = std::io::Error;
     type Subscription = RecordingSubscriptions;

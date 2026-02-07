@@ -1,7 +1,11 @@
 use hdrhistogram::Histogram;
 use std::time::{Duration, Instant};
 
+use super::circular_buffer::CircularBuffer;
 use super::types::WsConnectionStats;
+
+const MAX_RECENT_ERRORS: usize = 100;
+const MAX_ERROR_TEXT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct ServerErrorRec {
@@ -17,6 +21,18 @@ struct InternalErrorRec {
     _error: String,
 }
 
+fn truncate_string(s: &str) -> String {
+    if s.len() <= MAX_ERROR_TEXT_BYTES {
+        return s.to_string();
+    }
+
+    let mut end = MAX_ERROR_TEXT_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Health monitor tracking websocket connection state without interior mutability.
 #[derive(Debug)]
 pub struct WsHealthMonitor {
@@ -27,8 +43,8 @@ pub struct WsHealthMonitor {
     message_count: u64,
     error_count: u64,
     reconnect_count: u64,
-    server_errors: Vec<ServerErrorRec>,
-    internal_errors: Vec<InternalErrorRec>,
+    server_errors: CircularBuffer<ServerErrorRec>,
+    internal_errors: CircularBuffer<InternalErrorRec>,
     latency_histogram: Histogram<u64>,
 }
 
@@ -43,8 +59,8 @@ impl WsHealthMonitor {
             message_count: 0,
             error_count: 0,
             reconnect_count: 0,
-            server_errors: Vec::new(),
-            internal_errors: Vec::new(),
+            server_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
+            internal_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
             latency_histogram: Histogram::new_with_bounds(1, 1_000_000, 3)
                 .expect("histogram bounds are valid"),
         }
@@ -75,19 +91,17 @@ impl WsHealthMonitor {
         self.server_errors.push(ServerErrorRec {
             _timestamp: Instant::now(),
             _code: code,
-            _message: message.to_string(),
+            _message: truncate_string(message),
         });
-        Self::truncate_errors(&mut self.server_errors);
     }
 
     pub fn record_internal_error(&mut self, context: &str, error: &str) {
         self.record_error();
         self.internal_errors.push(InternalErrorRec {
             _timestamp: Instant::now(),
-            _context: context.to_string(),
-            _error: error.to_string(),
+            _context: truncate_string(context),
+            _error: truncate_string(error),
         });
-        Self::truncate_errors(&mut self.internal_errors);
     }
 
     pub fn record_rtt(&mut self, latency: Duration) {
@@ -132,14 +146,6 @@ impl WsHealthMonitor {
             latency_samples,
         }
     }
-
-    fn truncate_errors<T>(records: &mut Vec<T>) {
-        const MAX_ERRORS: usize = 100;
-        if records.len() > MAX_ERRORS {
-            let drop = records.len() - MAX_ERRORS;
-            records.drain(0..drop);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -168,7 +174,7 @@ mod tests {
         }
 
         assert_eq!(monitor.server_errors.len(), 100);
-        assert_eq!(monitor.server_errors.first().unwrap()._code, Some(5));
+        assert_eq!(monitor.server_errors.front().unwrap()._code, Some(5));
         assert_eq!(monitor.error_count, 105);
 
         monitor.clear_error_buffers();
@@ -179,7 +185,7 @@ mod tests {
         }
 
         assert_eq!(monitor.internal_errors.len(), 100);
-        assert_eq!(monitor.internal_errors.first().unwrap()._error, "error-5");
+        assert_eq!(monitor.internal_errors.front().unwrap()._error, "error-5");
         assert_eq!(monitor.error_count, 210);
     }
 
@@ -195,5 +201,12 @@ mod tests {
 
         assert!(monitor.is_stale());
     }
-}
 
+    #[test]
+    fn health_monitor_caps_error_string_sizes() {
+        let mut monitor = WsHealthMonitor::new(Duration::from_secs(5));
+        let huge = "x".repeat(MAX_ERROR_TEXT_BYTES + 10);
+        monitor.record_server_error(None, &huge);
+        assert_eq!(monitor.server_errors.front().unwrap()._message.len(), MAX_ERROR_TEXT_BYTES);
+    }
+}

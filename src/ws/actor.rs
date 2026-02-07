@@ -27,7 +27,7 @@ use super::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
 use super::types::{
     WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration, WsBufferPool,
     WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause, WsErrorAction,
-    WsExchangeHandler, WsLatencyPercentile, WsLatencyPolicy, WsMessage, WsMessageAction,
+    WsEndpointHandler, WsLatencyPercentile, WsLatencyPolicy, WsMessage, WsMessageAction,
     WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsTlsConfig,
     WsSubscriptionStatus, into_ws_message, message_bytes,
 };
@@ -51,7 +51,7 @@ struct LatencyBreach {
 /// Arguments passed when constructing a websocket actor instance.
 pub struct WebSocketActorArgs<E, R, P, T = TungsteniteTransport>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -76,7 +76,7 @@ where
 /// Skeleton websocket actor that will be fleshed out in later sprints.
 pub struct WebSocketActor<E, R, P, T = TungsteniteTransport>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -119,7 +119,7 @@ where
 
 impl<E, R, P, T> Actor for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -241,7 +241,7 @@ where
 
 impl<E, R, P, T> KameoMessage<WebSocketEvent> for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -327,7 +327,7 @@ pub(crate) struct ConnectionFailed {
 
 impl<E, R, P, T> KameoMessage<ConnectionEstablished<T>> for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -346,7 +346,7 @@ where
 
 impl<E, R, P, T> KameoMessage<ConnectionFailed> for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -367,7 +367,7 @@ pub struct GetConnectionStats;
 
 impl<E, R, P, T> KameoMessage<GetConnectionStats> for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -385,7 +385,7 @@ where
 
 impl<E, R, P, T> WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -1091,7 +1091,7 @@ where
                         )));
                     }
                     // Zero-copy: parse directly on the tungstenite frame bytes.
-                    self.dispatch_exchange(bytes).await?;
+                    self.dispatch_endpoint(bytes).await?;
                 }
             }
         }
@@ -1099,8 +1099,8 @@ where
         Ok(())
     }
 
-    async fn dispatch_exchange(&mut self, bytes: &[u8]) -> WebSocketResult<()> {
-        // tracing::info!(target: "solana-ws", len = bytes.len(), "processing dispatch_exchange");
+    async fn dispatch_endpoint(&mut self, bytes: &[u8]) -> WebSocketResult<()> {
+        // tracing::info!(target: "solana-ws", len = bytes.len(), "processing dispatch_endpoint");
         match self
             .handler
             .subscription_manager()
@@ -1112,7 +1112,7 @@ where
                     self.health.record_server_error(None, &msg);
                     self.handle_disconnect(
                         msg.clone(),
-                        WsDisconnectCause::ExchangeRequested { reason: msg },
+                        WsDisconnectCause::EndpointRequested { reason: msg },
                     )
                     .await?;
                     return Ok(());
@@ -1170,7 +1170,7 @@ where
             WsMessageAction::Reconnect(reason) => {
                 self.handle_disconnect(
                     reason.clone(),
-                    WsDisconnectCause::ExchangeRequested { reason },
+                    WsDisconnectCause::EndpointRequested { reason },
                 )
                 .await?;
             }
@@ -1247,7 +1247,7 @@ where
 
 impl<E, R, P, T> WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -1576,7 +1576,7 @@ impl<E, R, P, T>
         WsSubscriptionUpdate<<E::Subscription as WsSubscriptionManager>::SubscriptionMessage>,
     > for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,
@@ -1596,7 +1596,7 @@ where
 
 impl<E, R, P, T> KameoMessage<WaitForWriter> for WebSocketActor<E, R, P, T>
 where
-    E: WsExchangeHandler,
+    E: WsEndpointHandler,
     R: WsReconnectStrategy,
     P: WsPingPongStrategy,
     T: WsTransport,

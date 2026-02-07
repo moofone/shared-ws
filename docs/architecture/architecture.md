@@ -12,7 +12,7 @@ This crate provides a high-performance WebSocket connection manager designed for
 
 ### `WebSocketActor<E, R, P, T>`
 
-`E: WsExchangeHandler` owns all adapter-specific state (auth, subscriptions, decode pipeline).
+`E: WsEndpointHandler` owns all adapter-specific state (auth, subscriptions, decode pipeline).
 
 `R: WsReconnectStrategy` decides backoff behavior.
 

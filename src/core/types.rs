@@ -43,8 +43,8 @@ pub enum WebSocketError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    #[error("Exchange error: {0}")]
-    ExchangeSpecific(String),
+    #[error("Endpoint error: {0}")]
+    EndpointSpecific(String),
 
     #[error("Backpressure: outbound queue full")]
     OutboundQueueFull,
@@ -157,7 +157,7 @@ pub enum WsDisconnectCause {
     ReadFailure {
         error: String,
     },
-    ExchangeRequested {
+    EndpointRequested {
         reason: String,
     },
     ServerError {
@@ -214,7 +214,7 @@ pub enum WsParseOutcome<T> {
     Message(WsMessageAction<T>),
 }
 
-/// Subscription management primitives shared by exchanges.
+/// Subscription management primitives shared by websocket clients.
 #[derive(Debug, Clone)]
 pub enum WsSubscriptionAction<T> {
     Add(Vec<T>),
@@ -233,7 +233,7 @@ pub enum WsSubscriptionStatus {
     NotSubscriptionResponse,
 }
 
-/// Trait describing the subscription lifecycle for an exchange websocket.
+/// Trait describing a subscription lifecycle for a websocket endpoint.
 pub trait WsSubscriptionManager: Send + Sync + 'static {
     type SubscriptionMessage: Send + 'static;
 
@@ -249,8 +249,8 @@ pub trait WsSubscriptionManager: Send + Sync + 'static {
     fn handle_subscription_response(&mut self, data: &[u8]) -> WsSubscriptionStatus;
 }
 
-/// Exchange specific websocket handler interface.
-pub trait WsExchangeHandler: Send + Sync + 'static {
+/// Application-specific websocket handler interface.
+pub trait WsEndpointHandler: Send + Sync + 'static {
     type Message: Send + 'static;
     type Error: std::error::Error + Send + Sync;
     type Subscription: WsSubscriptionManager;

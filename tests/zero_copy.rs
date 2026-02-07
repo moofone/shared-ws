@@ -2,7 +2,7 @@ use bytes::Bytes;
 use defi_ws::transport::tungstenite::TungsteniteTransport;
 use defi_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
-    WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsExchangeHandler, WsMessage,
+    WsDisconnectAction, WsDisconnectCause, WsErrorAction, WsEndpointHandler, WsMessage,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction, WsTlsConfig,
     WsSubscriptionManager, WsSubscriptionStatus,
 };
@@ -79,7 +79,7 @@ impl PtrCheckHandler {
     }
 }
 
-impl WsExchangeHandler for PtrCheckHandler {
+impl WsEndpointHandler for PtrCheckHandler {
     type Message = ();
     type Error = PtrCheckError;
     type Subscription = NoopSubscriptions;
