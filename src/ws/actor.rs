@@ -16,27 +16,32 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+use super::WsCircuitBreaker;
 use super::WsMetricsHook;
+use super::delegated::{WsDelegatedError, WsDelegatedOk, WsDelegatedRequest};
+use super::delegated_pending::{PendingInsertOutcome, PendingTable};
 use super::health::WsHealthMonitor;
 use super::ping::{WsPingPongStrategy, WsPongResult};
-use super::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
 use super::types::{
     ForwardAllIngress, WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration,
     WsBufferPool, WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
     WsEndpointHandler, WsErrorAction, WsIngress, WsIngressAction, WsLatencyPercentile,
     WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsPayloadLatencySamplingConfig,
-    WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
-    WsTlsConfig, into_ws_message, message_bytes,
+    WsReconnectStrategy, WsRequestMatch, WsSubscriptionAction, WsSubscriptionManager,
+    WsSubscriptionStatus, WsTlsConfig, into_ws_message, message_bytes,
 };
 use super::writer::{
     WriterWrite, WsWriterActor, spawn_writer_supervised_with, spawn_writer_supervisor,
 };
-use crate::core::global_rate_limit::{AcquirePermits, WsGlobalRateLimitHandle};
+use crate::core::connection_policy::jitter_delay;
 use crate::supervision::TypedSupervisor;
 use crate::transport::WsTransport;
 use crate::transport::tungstenite::TungsteniteTransport;
 use kameo::error::RegistryError;
 use kameo::prelude::{Actor, ActorRef, Context, Message as KameoMessage, WeakActorRef};
+use kameo::reply::{DelegatedReply, ReplySender};
+
+const DEFAULT_MAX_PENDING_REQUESTS: usize = 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct LatencyBreach {
@@ -71,9 +76,6 @@ pub struct WebSocketActorArgs<
     pub stale_threshold: Duration,
     pub ws_buffers: WebSocketBufferConfig,
     pub outbound_capacity: usize,
-    /// Optional global per-provider outbound rate limiter (send-side only).
-    pub global_rate_limit: Option<WsGlobalRateLimitHandle>,
-    pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
     /// Opt-in distributed instrumentation: sample payload timestamp lag at low frequency.
@@ -118,10 +120,6 @@ pub struct WebSocketActor<
     writer_supervisor_ref: Option<ActorRef<TypedSupervisor<WsWriterActor<T::Writer>>>>,
     writer_ready: Notify,
     pub outbound_capacity: usize,
-    pub global_rate_limit: Option<WsGlobalRateLimitHandle>,
-    global_permits: u32,
-    outbound_drain_scheduled_at: Option<Instant>,
-    pub rate_limiter: Option<WsRateLimiter>,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
     pub latency_breach_streak: u32,
@@ -132,6 +130,8 @@ pub struct WebSocketActor<
     pub reconnect_attempt: u64,
     pub metrics: Option<WsMetricsHook>,
     pending_outbound: VecDeque<WsMessage>,
+    delegated_pending: PendingTable<ReplySender<Result<WsDelegatedOk, WsDelegatedError>>>,
+    delegated_expiry_scheduled_at: Option<Instant>,
     inbound_bytes_total: u64,
     outbound_bytes_total: u64,
     last_inbound_payload_len: Option<usize>,
@@ -167,8 +167,6 @@ where
             stale_threshold,
             ws_buffers,
             outbound_capacity,
-            global_rate_limit,
-            rate_limiter,
             circuit_breaker,
             latency_policy,
             payload_latency_sampling,
@@ -202,6 +200,10 @@ where
         // Avoid an extra refcount bump: we can move `ctx` into the actor after registration.
         let actor_ref = ctx;
         let pending_outbound = VecDeque::with_capacity(outbound_capacity);
+        let delegated_pending =
+            PendingTable::<ReplySender<Result<WsDelegatedOk, WsDelegatedError>>>::new(
+                DEFAULT_MAX_PENDING_REQUESTS,
+            );
         let health = WsHealthMonitor::new(stale_threshold);
 
         Ok(Self {
@@ -225,10 +227,6 @@ where
             writer_supervisor_ref: None,
             writer_ready: Notify::new(),
             outbound_capacity,
-            global_rate_limit,
-            global_permits: 0,
-            outbound_drain_scheduled_at: None,
-            rate_limiter,
             circuit_breaker,
             latency_policy,
             latency_breach_streak: 0,
@@ -239,6 +237,8 @@ where
             reconnect_attempt: 0,
             metrics,
             pending_outbound,
+            delegated_pending,
+            delegated_expiry_scheduled_at: None,
             inbound_bytes_total: 0,
             outbound_bytes_total: 0,
             last_inbound_payload_len: None,
@@ -256,6 +256,7 @@ where
         Ok(())
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_panic(
         &mut self,
         _actor_ref: kameo::actor::WeakActorRef<Self>,
@@ -330,6 +331,57 @@ where
             WebSocketEvent::CheckStale => {
                 self.check_stale().await?;
             }
+            WebSocketEvent::DelegatedWriteDone {
+                request_id,
+                ok,
+                error,
+            } => {
+                if ok {
+                    let waiters = self
+                        .delegated_pending
+                        .mark_sent_ok(request_id)
+                        .unwrap_or_default();
+                    for waiter in waiters {
+                        waiter.send(Ok(WsDelegatedOk {
+                            request_id,
+                            confirmed: false,
+                            rate_limit_feedback: None,
+                        }));
+                    }
+                } else {
+                    let waiters = self
+                        .delegated_pending
+                        .complete_not_delivered(request_id)
+                        .unwrap_or_default();
+                    let msg = error.unwrap_or_else(|| "writer send failed".to_string());
+                    for waiter in waiters {
+                        waiter.send(Err(WsDelegatedError::not_delivered(
+                            request_id,
+                            msg.clone(),
+                        )));
+                    }
+                }
+                self.schedule_delegated_expiry();
+            }
+            WebSocketEvent::DelegatedExpire => {
+                self.delegated_expiry_scheduled_at = None;
+                let now = Instant::now();
+                let expired = self.delegated_pending.expire_due(now);
+                for entry in expired {
+                    let msg = if entry.sent_ok {
+                        "deadline elapsed awaiting confirmation".to_string()
+                    } else {
+                        "deadline elapsed awaiting send".to_string()
+                    };
+                    for waiter in entry.waiters {
+                        waiter.send(Err(WsDelegatedError::unconfirmed(
+                            entry.request_id,
+                            msg.clone(),
+                        )));
+                    }
+                }
+                self.schedule_delegated_expiry();
+            }
             WebSocketEvent::SendMessage(message) => {
                 if let Err(err) = self.enqueue_message(message).await {
                     let reason = format!("outbound send failed: {err}");
@@ -354,7 +406,6 @@ where
                 }
             }
             WebSocketEvent::DrainOutbound => {
-                self.outbound_drain_scheduled_at = None;
                 if let Err(err) = self.drain_pending_outbound().await {
                     let reason = format!("outbound drain failed: {err}");
                     let cause = WsDisconnectCause::InternalError {
@@ -545,17 +596,15 @@ where
     }
 
     async fn await_task(handle: &mut Option<JoinHandle<()>>) {
-        if let Some(handle) = handle.take() {
-            if let Err(err) = handle.await {
-                warn!("task terminated with error: {err}");
-            }
+        if let Some(handle) = handle.take()
+            && let Err(err) = handle.await
+        {
+            warn!("task terminated with error: {err}");
         }
     }
 
     async fn await_reader(handle: &mut Option<JoinHandle<I>>) -> Option<I> {
-        let Some(handle) = handle.take() else {
-            return None;
-        };
+        let handle = handle.take()?;
         match handle.await {
             Ok(ingress) => Some(ingress),
             Err(err) => {
@@ -572,8 +621,6 @@ where
         self.writer_ref = None;
         self.pending_outbound.clear();
         self.writer_ready = Notify::new();
-        self.outbound_drain_scheduled_at = None;
-        self.global_permits = 0;
     }
 
     fn reset_shutdown_channel(&mut self) {
@@ -594,17 +641,17 @@ where
 
     async fn handle_connect(&mut self) -> WebSocketResult<()> {
         self.health.record_connect_attempt();
-        if let Some(cb) = self.circuit_breaker.as_mut() {
-            if !cb.can_proceed() {
-                if let Some(delay) = cb.time_until_retry() {
-                    let actor_ref = self.actor_ref.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        let _ = actor_ref.tell(WebSocketEvent::Connect).send().await;
-                    });
-                }
-                return Ok(());
+        if let Some(cb) = self.circuit_breaker.as_mut()
+            && !cb.can_proceed()
+        {
+            if let Some(delay) = cb.time_until_retry() {
+                let actor_ref = self.actor_ref.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = actor_ref.tell(WebSocketEvent::Connect).send().await;
+                });
             }
+            return Ok(());
         }
 
         let self_ref = self.actor_ref.clone();
@@ -980,16 +1027,16 @@ where
     }
 
     async fn send_initial_messages(&mut self) -> WebSocketResult<()> {
-        if let Some(auth) = self.handler.generate_auth() {
-            if let Err(err) = self.enqueue_message(into_ws_message(auth)).await {
-                let reason = format!("auth send failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "auth_send".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                return Ok(());
-            }
+        if let Some(auth) = self.handler.generate_auth()
+            && let Err(err) = self.enqueue_message(into_ws_message(auth)).await
+        {
+            let reason = format!("auth send failed: {err}");
+            let cause = WsDisconnectCause::InternalError {
+                context: "auth_send".to_string(),
+                error: err.to_string(),
+            };
+            self.handle_disconnect(reason, cause).await?;
+            return Ok(());
         }
 
         let subscriptions = self.handler.subscription_manager().initial_subscriptions();
@@ -1071,19 +1118,6 @@ where
         };
 
         while !self.pending_outbound.is_empty() {
-            match self.acquire_outbound_permit().await {
-                Ok(()) => {}
-                Err(WebSocketError::RateLimited { retry_after, .. }) => {
-                    if let Some(delay) = retry_after {
-                        self.schedule_outbound_drain(delay);
-                        return Ok(());
-                    }
-                    return Ok(());
-                }
-                Err(other) => return Err(other),
-            }
-
-            // Permit acquired; now we can pop and send.
             let queued = self
                 .pending_outbound
                 .pop_front()
@@ -1102,53 +1136,29 @@ where
         Ok(())
     }
 
-    async fn acquire_outbound_permit(&mut self) -> WebSocketResult<()> {
-        // Global per-provider limiter: request permits in batches to amortize actor messaging.
-        if let Some(handle) = self.global_rate_limit.as_ref() {
-            if self.global_permits == 0 {
-                let reply = handle
-                    .limiter
-                    .ask(AcquirePermits {
-                        provider: handle.provider.clone(),
-                        permits: handle.batch,
-                    })
-                    .await
-                    .map_err(|err| match err {
-                        kameo::error::SendError::HandlerError(err) => err,
-                        other => WebSocketError::ActorError(other.to_string()),
-                    })?;
-                self.global_permits = reply.permits;
-            }
-            if self.global_permits == 0 {
-                return Err(WebSocketError::RateLimited {
-                    message: "rate limit exceeded".to_string(),
-                    retry_after: Some(Duration::from_millis(1)),
-                });
-            }
-            self.global_permits = self.global_permits.saturating_sub(1);
-            return Ok(());
-        }
+    fn schedule_delegated_expiry(&mut self) {
+        let Some(next_deadline) = self.delegated_pending.next_deadline() else {
+            self.delegated_expiry_scheduled_at = None;
+            return;
+        };
 
-        // Local per-actor limiter (legacy / fallback).
-        if let Some(limiter) = self.rate_limiter.as_mut() {
-            limiter.try_acquire()?;
-        }
-        Ok(())
-    }
-
-    fn schedule_outbound_drain(&mut self, delay: Duration) {
         let now = Instant::now();
+        let delay = next_deadline
+            .checked_duration_since(now)
+            .unwrap_or(Duration::ZERO);
         let when = now + delay;
-        if let Some(existing) = self.outbound_drain_scheduled_at {
-            if existing <= when {
-                return;
-            }
+
+        if let Some(existing) = self.delegated_expiry_scheduled_at
+            && existing <= when
+        {
+            return;
         }
-        self.outbound_drain_scheduled_at = Some(when);
+
+        self.delegated_expiry_scheduled_at = Some(when);
         let actor_ref = self.actor_ref.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = actor_ref.tell(WebSocketEvent::DrainOutbound).send().await;
+            let _ = actor_ref.tell(WebSocketEvent::DelegatedExpire).send().await;
         });
     }
 
@@ -1162,8 +1172,8 @@ where
                 self.outbound_bytes_total.saturating_add(bytes.len() as u64);
             self.last_outbound_payload_len = Some(bytes.len());
         }
-        match writer.tell(WriterWrite { message }).send().await {
-            Ok(_) => {
+        match writer.ask(WriterWrite { message }).await {
+            Ok(()) => {
                 self.health.record_sent();
                 Ok(())
             }
@@ -1380,6 +1390,13 @@ where
             }
         }
 
+        if !self.delegated_pending.is_empty()
+            && self.handler.maybe_request_response(bytes)
+            && let Some(req_match) = self.handler.match_request_response(bytes)
+        {
+            self.complete_delegated_from_match(req_match);
+        }
+
         match self.handler.parse_frame(frame) {
             Ok(WsParseOutcome::ServerError {
                 code,
@@ -1403,36 +1420,33 @@ where
                 // frequency, and only if a metrics hook is configured.
                 if let (Some(cfg), Some(metrics)) =
                     (self.payload_latency_sampling, self.metrics.as_ref())
+                    && cfg.interval > Duration::ZERO
                 {
-                    if cfg.interval > Duration::from_secs(0) {
-                        let now = Instant::now();
-                        if now >= self.next_payload_latency_sample_at {
-                            self.next_payload_latency_sample_at = now + cfg.interval;
-                            if let Some(now_epoch_us) =
-                                WsPayloadLatencySamplingConfig::now_epoch_us()
-                            {
-                                // Split field borrows: we want an immutable connection id while
-                                // mutably borrowing the handler.
-                                let connection = self
-                                    .registration
-                                    .as_ref()
-                                    .map(|r| r.name.as_str())
-                                    .unwrap_or(self.url.as_str());
+                    let now = Instant::now();
+                    if now >= self.next_payload_latency_sample_at {
+                        self.next_payload_latency_sample_at = now + cfg.interval;
+                        if let Some(now_epoch_us) = WsPayloadLatencySamplingConfig::now_epoch_us() {
+                            // Split field borrows: we want an immutable connection id while
+                            // mutably borrowing the handler.
+                            let connection = self
+                                .registration
+                                .as_ref()
+                                .map(|r| r.name.as_str())
+                                .unwrap_or(self.url.as_str());
 
-                                self.handler.sample_payload_timestamps_us(
-                                    bytes,
-                                    &mut |kind, payload_ts_us| {
-                                        let lag_us = now_epoch_us.saturating_sub(payload_ts_us);
-                                        if lag_us >= 0 {
-                                            metrics.observe_payload_lag_us(
-                                                connection,
-                                                kind,
-                                                lag_us as u64,
-                                            );
-                                        }
-                                    },
-                                );
-                            }
+                            self.handler.sample_payload_timestamps_us(
+                                bytes,
+                                &mut |kind, payload_ts_us| {
+                                    let lag_us = now_epoch_us.saturating_sub(payload_ts_us);
+                                    if lag_us >= 0 {
+                                        metrics.observe_payload_lag_us(
+                                            connection,
+                                            kind,
+                                            lag_us as u64,
+                                        );
+                                    }
+                                },
+                            );
                         }
                     }
                 }
@@ -1446,6 +1460,39 @@ where
         }
 
         Ok(())
+    }
+
+    fn complete_delegated_from_match(&mut self, req_match: WsRequestMatch) {
+        let request_id = req_match.request_id;
+        match req_match.result {
+            Ok(()) => {
+                let waiters = self
+                    .delegated_pending
+                    .complete_confirmed(request_id)
+                    .unwrap_or_default();
+                for waiter in waiters {
+                    waiter.send(Ok(WsDelegatedOk {
+                        request_id,
+                        confirmed: true,
+                        rate_limit_feedback: req_match.rate_limit_feedback.clone(),
+                    }));
+                }
+            }
+            Err(message) => {
+                let waiters = self
+                    .delegated_pending
+                    .complete_rejected(request_id)
+                    .unwrap_or_default();
+                for waiter in waiters {
+                    waiter.send(Err(WsDelegatedError::endpoint_rejected(
+                        request_id,
+                        message.clone(),
+                        req_match.rate_limit_feedback.clone(),
+                    )));
+                }
+            }
+        }
+        self.schedule_delegated_expiry();
     }
 
     async fn handle_message_action(
@@ -1554,6 +1601,7 @@ where
             .unwrap_or(&self.url)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn log_reconnect_plan(
         &self,
         event: &str,
@@ -1639,9 +1687,7 @@ fn evaluate_latency_policy_internal(
     stats: &WsConnectionStats,
     streak: &mut u32,
 ) -> Option<LatencyBreach> {
-    let Some(policy) = policy else {
-        return None;
-    };
+    let policy = policy?;
 
     let observed = match policy.percentile {
         WsLatencyPercentile::P50 => stats.p50_latency_us,
@@ -1724,27 +1770,6 @@ mod latency_tests {
             p99_latency_us: p99,
             latency_samples: samples,
         }
-    }
-
-    #[test]
-    fn rate_limiter_blocks_and_recovers() {
-        let mut limiter = WsRateLimiter::new(2, Duration::from_millis(20));
-
-        assert!(limiter.try_acquire().is_ok());
-        assert!(limiter.try_acquire().is_ok());
-
-        match limiter.try_acquire() {
-            Err(WebSocketError::RateLimited {
-                retry_after: Some(retry_after),
-                ..
-            }) => {
-                assert!(retry_after <= Duration::from_millis(20));
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
-
-        thread::sleep(Duration::from_millis(25));
-        assert!(limiter.try_acquire().is_ok());
     }
 
     #[test]
@@ -1857,6 +1882,14 @@ pub enum WebSocketEvent {
     },
     SendPing,
     CheckStale,
+    /// Completion event for delegated requests after observing a writer send result.
+    DelegatedWriteDone {
+        request_id: u64,
+        ok: bool,
+        error: Option<String>,
+    },
+    /// Timer tick to expire delegated pending requests by deadline.
+    DelegatedExpire,
     ResetState,
     UpdateConnectionStatus(WsConnectionStatus),
 }
@@ -1865,6 +1898,109 @@ pub enum WebSocketEvent {
 #[derive(Clone, Copy, Debug)]
 pub struct WaitForWriter {
     pub timeout: Duration,
+}
+
+/// Public ask-able request API: send an outbound frame and await a terminal outcome.
+///
+/// Sprint 1 supports:
+/// - deterministic `NotDelivered` (writer send error)
+/// - `Unconfirmed` timeouts for `confirm_mode=Confirmed` (no matcher yet)
+impl<E, R, P, I, T> KameoMessage<WsDelegatedRequest> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = DelegatedReply<Result<WsDelegatedOk, WsDelegatedError>>;
+
+    async fn handle(
+        &mut self,
+        req: WsDelegatedRequest,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let Some(writer) = self.writer_ref.as_ref().cloned() else {
+            return ctx.reply(Err(WsDelegatedError::not_delivered(
+                req.request_id,
+                "writer not ready",
+            )));
+        };
+
+        let (delegated_reply, waiter) = ctx.reply_sender();
+        let (outcome, waiter) = self.delegated_pending.insert_or_join(
+            req.request_id,
+            req.fingerprint,
+            req.confirm_deadline,
+            req.confirm_mode,
+            waiter,
+        );
+
+        match outcome {
+            PendingInsertOutcome::Inserted => {
+                self.schedule_delegated_expiry();
+                let actor_ref = self.actor_ref.clone();
+                let request_id = req.request_id;
+                let message = req.frame;
+                tokio::spawn(async move {
+                    let result = writer.ask(WriterWrite { message }).await;
+                    match result {
+                        Ok(()) => {
+                            let _ = actor_ref
+                                .tell(WebSocketEvent::DelegatedWriteDone {
+                                    request_id,
+                                    ok: true,
+                                    error: None,
+                                })
+                                .send()
+                                .await;
+                        }
+                        Err(err) => {
+                            let _ = actor_ref
+                                .tell(WebSocketEvent::DelegatedWriteDone {
+                                    request_id,
+                                    ok: false,
+                                    error: Some(err.to_string()),
+                                })
+                                .send()
+                                .await;
+                        }
+                    }
+                });
+            }
+            PendingInsertOutcome::Joined => {
+                // Joining may have tightened the deadline; ensure expiry is scheduled.
+                self.schedule_delegated_expiry();
+            }
+            PendingInsertOutcome::JoinedAlreadySent => {
+                if let Some(waiter) = waiter {
+                    waiter.send(Ok(WsDelegatedOk {
+                        request_id: req.request_id,
+                        confirmed: false,
+                        rate_limit_feedback: None,
+                    }));
+                }
+                // Joining may have tightened the deadline for confirmed waiters (if any).
+                self.schedule_delegated_expiry();
+            }
+            PendingInsertOutcome::PayloadMismatch => {
+                if let Some(waiter) = waiter {
+                    waiter.send(Err(WsDelegatedError::PayloadMismatch {
+                        request_id: req.request_id,
+                    }));
+                }
+            }
+            PendingInsertOutcome::TooManyPending => {
+                if let Some(waiter) = waiter {
+                    waiter.send(Err(WsDelegatedError::TooManyPending {
+                        max: DEFAULT_MAX_PENDING_REQUESTS,
+                    }));
+                }
+            }
+        }
+
+        delegated_reply
+    }
 }
 
 /// Message for mutating the active subscription set managed by the handler.

@@ -371,6 +371,25 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
         self.parse(bytes)
     }
 
+    /// Optional fast-path precheck to determine if an inbound frame might be a response
+    /// that can confirm/reject a delegated request.
+    ///
+    /// Default is `false` so high-volume endpoints pay only a single predictable branch.
+    #[inline]
+    fn maybe_request_response(&self, _data: &[u8]) -> bool {
+        false
+    }
+
+    /// Optional matcher to correlate inbound frames to a pending delegated request.
+    ///
+    /// When a match is returned, the websocket actor will complete the pending request (if any)
+    /// and still continue normal parse flow unless the endpoint chooses to short-circuit
+    /// inside `parse_frame`.
+    #[inline]
+    fn match_request_response(&mut self, _data: &[u8]) -> Option<WsRequestMatch> {
+        None
+    }
+
     fn handle_message(&mut self, msg: Self::Message) -> Result<(), Self::Error>;
 
     fn handle_server_error(
@@ -400,6 +419,23 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
         _emit: &mut dyn FnMut(&'static str, i64),
     ) {
     }
+}
+
+/// Protocol-agnostic optional feedback surfaced from an endpoint's response matcher.
+///
+/// This is informational only; `shared-ws` does not apply rate-limiting policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WsRateLimitFeedback {
+    pub retry_after: Option<Duration>,
+    pub hint: Option<String>,
+}
+
+/// A correlated inbound response for a delegated request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WsRequestMatch {
+    pub request_id: u64,
+    pub result: Result<(), String>,
+    pub rate_limit_feedback: Option<WsRateLimitFeedback>,
 }
 
 /// Configuration for opt-in payload timestamp lag sampling.

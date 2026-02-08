@@ -36,3 +36,7 @@ harness = false
 # Benchmarks are specifically used to validate micro-optimizations; reduce codegen overhead.
 lto = "thin"
 codegen-units = 1
+
+[workspace]
+resolver = "2"
+members = [".", "examples-ws"]

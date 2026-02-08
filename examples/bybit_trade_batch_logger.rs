@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
 
-        let Some(mut it) = data_lv.clone().into_array_iter() else {
+        let Some(it) = data_lv.clone().into_array_iter() else {
             continue;
         };
 
@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut first_sym_hash: Option<u64> = None;
         let mut multi_sym = false;
 
-        while let Some(elem) = it.next() {
+        for elem in it {
             let Ok(elem) = elem else { break };
 
             let t = elem.get("T").and_then(|x| x.as_i64()).unwrap_or(0);
