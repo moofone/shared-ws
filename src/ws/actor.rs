@@ -1341,11 +1341,14 @@ where
             }
             WsPongResult::NotPong => {
                 if let Some(bytes) = message_bytes(&message) {
-                    if bytes.len() > self.buffers.inbound_capacity() {
+                    // This is a transport-independent guardrail. Do not tie it to the actor's
+                    // scratch buffer size: in the zero-copy path we parse directly on transport
+                    // bytes, and transports may allow `max_message_bytes > read_buffer_bytes`.
+                    if bytes.len() > self.ws_buffers.max_message_bytes {
                         return Err(WebSocketError::ParseFailed(format!(
-                            "frame too large: {} > inbound buffer {}",
+                            "frame too large: {} > max message {}",
                             bytes.len(),
-                            self.buffers.inbound_capacity()
+                            self.ws_buffers.max_message_bytes
                         )));
                     }
                     // Zero-copy: parse directly on the tungstenite frame bytes.
@@ -1869,7 +1872,10 @@ pub enum WebSocketEvent {
     },
     SendMessage(WsMessage),
     SendBatch(Vec<WsMessage>),
-    /// Attempt to drain any queued outbound messages (used for rate-limit retries).
+    /// Attempt to drain any queued outbound messages.
+    ///
+    /// This is currently unused by `shared-ws` itself (the actor drains eagerly on enqueue),
+    /// but kept as an explicit event for potential external coordination/testing hooks.
     DrainOutbound,
     ServerError {
         code: Option<i32>,
@@ -1902,9 +1908,9 @@ pub struct WaitForWriter {
 
 /// Public ask-able request API: send an outbound frame and await a terminal outcome.
 ///
-/// Sprint 1 supports:
-/// - deterministic `NotDelivered` (writer send error)
-/// - `Unconfirmed` timeouts for `confirm_mode=Confirmed` (no matcher yet)
+/// - `confirm_mode=Sent`: completes once the writer accepts the frame.
+/// - `confirm_mode=Confirmed`: completes once an inbound confirmation is matched via
+///   `WsEndpointHandler::match_request_response`, or times out as `Unconfirmed`.
 impl<E, R, P, I, T> KameoMessage<WsDelegatedRequest> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,

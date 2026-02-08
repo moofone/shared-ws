@@ -75,6 +75,17 @@ fn frame_to_msg(frame: WsFrame) -> TungsteniteMessage {
     }
 }
 
+fn build_ws_config(buffers: WebSocketBufferConfig) -> WebSocketConfig {
+    let mut config = WebSocketConfig::default();
+    // Transport-level limits must reflect configured transport limits, not internal scratch
+    // buffer sizes (e.g. read_buffer_bytes). `read_buffer_bytes` is an actor optimization knob.
+    config.max_message_size = Some(buffers.max_message_bytes);
+    config.max_frame_size = Some(buffers.max_frame_bytes);
+    config.write_buffer_size = buffers.write_buffer_bytes;
+    config.max_write_buffer_size = buffers.max_write_buffer_bytes;
+    config
+}
+
 #[derive(Clone, Default)]
 pub struct TungsteniteTransport {
     connector: Option<Connector>,
@@ -159,13 +170,7 @@ impl WsTransport for TungsteniteTransport {
         Box::pin(async move {
             install_rustls_crypto_provider();
 
-            let mut config = WebSocketConfig::default();
-            let max_message = buffers.max_message_bytes.max(buffers.read_buffer_bytes);
-            let max_frame = buffers.max_frame_bytes.max(buffers.read_buffer_bytes);
-            config.max_message_size = Some(max_message);
-            config.max_frame_size = Some(max_frame);
-            config.write_buffer_size = buffers.write_buffer_bytes;
-            config.max_write_buffer_size = buffers.max_write_buffer_bytes;
+            let config = build_ws_config(buffers);
 
             let disable_tls_validation = !tls.validate_certs;
 
@@ -203,4 +208,35 @@ impl WsTransport for TungsteniteTransport {
 /// Accept an incoming websocket connection and return a client wrapper used by tests/examples.
 pub async fn accept_async(stream: TcpStream) -> Result<crate::client::WsClient, WebSocketError> {
     crate::client::accept_async(stream).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tungstenite_limits_do_not_depend_on_read_buffer_bytes() {
+        let buffers = WebSocketBufferConfig {
+            read_buffer_bytes: 64 << 10,
+            max_message_bytes: 2 << 20,
+            max_frame_bytes: 3 << 20,
+            write_buffer_bytes: 111,
+            max_write_buffer_bytes: 222,
+        };
+
+        let cfg = build_ws_config(buffers);
+        assert_eq!(cfg.max_message_size, Some(2 << 20));
+        assert_eq!(cfg.max_frame_size, Some(3 << 20));
+        assert_eq!(cfg.write_buffer_size, 111);
+        assert_eq!(cfg.max_write_buffer_size, 222);
+
+        // Changing read buffer bytes should not alter transport limits.
+        let buffers2 = WebSocketBufferConfig {
+            read_buffer_bytes: 128 << 20,
+            ..buffers
+        };
+        let cfg2 = build_ws_config(buffers2);
+        assert_eq!(cfg2.max_message_size, Some(2 << 20));
+        assert_eq!(cfg2.max_frame_size, Some(3 << 20));
+    }
 }

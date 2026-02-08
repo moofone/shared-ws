@@ -8,6 +8,14 @@ This crate provides a high-performance WebSocket connection manager designed for
 - Transport-neutral frames (`WsFrame`).
 - A swappable transport boundary (tokio-tungstenite today; fastwebsockets later).
 
+## Related Docs
+
+- Self-healing + state preservation: [`docs/architecture/self_healing.md`](self_healing.md)
+- Pluggable ping/pong: [`docs/architecture/pluggable_pingpong.md`](pluggable_pingpong.md)
+- Latency policy hooks: [`docs/architecture/latency_policy_hooks.md`](latency_policy_hooks.md)
+- JSON parse modes: [`docs/architecture/json_parse_modes.md`](json_parse_modes.md)
+- Delegated reply requests (design + semantics): [`spec/DELEGATED_REPLY_WS.md`](../../spec/DELEGATED_REPLY_WS.md)
+
 ## Key Components
 
 ### `WebSocketActor<E, R, P, I, T>`
@@ -25,6 +33,7 @@ The actor:
 - Spawns a `reader_task` that blocks on socket reads.
 - Spawns a `WsWriterActor` to serialize outbound frames.
 - Runs subscription/auth orchestration and disconnect classification inside the actor.
+- Optionally supports "send + await outcome" flows via `ask(WsDelegatedRequest)` (see below).
 
 ### Reader Task (Outside Kameo)
 
@@ -55,6 +64,33 @@ Stale detection continuity:
 
 - `WriterWrite { message }` for single-frame sends.
 - `WriterWriteBatch { messages }` for batched feed+flush sends.
+
+### Delegated Reply Requests (Send + Await Confirmation)
+
+For request/response style websocket APIs (for example JSON-RPC over websocket), `shared-ws`
+exposes an ask-able message:
+
+- `WsDelegatedRequest { request_id, fingerprint, frame, confirm_deadline, confirm_mode }`
+
+Semantics:
+
+- `confirm_mode = Sent`: reply once the writer accepts the frame for writing.
+- `confirm_mode = Confirmed`: reply only once an endpoint-specific confirmation is observed, or
+  `Unconfirmed` if the deadline elapses.
+- Duplicate in-flight requests for the same `request_id` are deduped:
+  - same `fingerprint`: join the existing pending entry without re-sending.
+  - different `fingerprint`: fail fast with `PayloadMismatch`.
+
+Confirmation matching is endpoint-defined and protocol-agnostic:
+
+- `WsEndpointHandler::maybe_request_response(&[u8]) -> bool` is a fast precheck (default `false`).
+- `WsEndpointHandler::match_request_response(&[u8]) -> Option<WsRequestMatch>` returns a correlated
+  match (request id + success/failure + optional retry-after hints).
+
+Pending requests are bounded and garbage-collected by deadline inside the actor.
+
+Important: `shared-ws` is rate-limiter agnostic. If you need outbound throttling, apply an external
+rate limiter/coordinator before calling `ask(WsDelegatedRequest { ... })`.
 
 ### Health + Stale Detection
 
