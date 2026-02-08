@@ -1,18 +1,14 @@
-pub mod circular_buffer;
-pub mod frame;
-pub mod global_rate_limit;
-pub mod health;
-pub mod ping;
-pub mod rate_limit;
-pub mod reconnect;
-pub mod types;
+// Canonical definitions live here, but this module is intentionally crate-private
+// (see `src/lib.rs`). External callers should use `crate::ws::*`.
+pub(crate) mod circular_buffer;
+pub(crate) mod frame;
+pub(crate) mod global_rate_limit;
+pub(crate) mod health;
+pub(crate) mod ping;
+pub(crate) mod rate_limit;
+pub(crate) mod reconnect;
+pub(crate) mod types;
 
-pub use circular_buffer::*;
-
-pub use frame::*;
-pub use global_rate_limit::*;
-pub use health::*;
-pub use ping::*;
-pub use rate_limit::*;
-pub use reconnect::*;
-pub use types::*;
+// Convenience re-exports for internal modules (`crate::core::{WsFrame, WebSocketError, ...}`).
+pub(crate) use frame::*;
+pub(crate) use types::*;

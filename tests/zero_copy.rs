@@ -138,7 +138,7 @@ async fn inbound_processing_is_zero_copy() {
         transport: TungsteniteTransport::default(),
         reconnect_strategy: reconnect,
         handler,
-        ingress: shared_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         ping_strategy: ping,
         enable_ping: true,
         stale_threshold: Duration::from_secs(30),

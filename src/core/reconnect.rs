@@ -17,7 +17,11 @@ pub struct ExponentialBackoffReconnect {
 
 impl ExponentialBackoffReconnect {
     pub fn new(base: Duration, max: Duration, factor: f64) -> Self {
-        let factor = if factor.is_finite() && factor > 1.0 { factor } else { 1.5 };
+        let factor = if factor.is_finite() && factor > 1.0 {
+            factor
+        } else {
+            1.5
+        };
         Self {
             base,
             max,
@@ -55,4 +59,3 @@ impl WsReconnectStrategy for ExponentialBackoffReconnect {
         self.retry
     }
 }
-

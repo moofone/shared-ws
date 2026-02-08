@@ -381,6 +381,11 @@ pub struct IngressEmit<M: Send + 'static> {
     pub message: M,
 }
 
+#[derive(Debug)]
+pub struct IngressEmitBatch<M: Send + 'static> {
+    pub messages: Vec<M>,
+}
+
 pub(crate) struct ConnectionFailed {
     pub(crate) error: String,
     pub(crate) status: Option<u16>,
@@ -443,6 +448,29 @@ where
     ) -> Self::Reply {
         self.handle_message_action(WsMessageAction::Process(msg.message))
             .await
+    }
+}
+
+impl<E, R, P, I, T> KameoMessage<IngressEmitBatch<E::Message>> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<()>;
+
+    async fn handle(
+        &mut self,
+        msg: IngressEmitBatch<E::Message>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        for m in msg.messages {
+            self.handle_message_action(WsMessageAction::Process(m))
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -793,6 +821,16 @@ where
                                             .send()
                                             .await
                                             .is_err() {
+                                            break;
+                                        }
+                                    }
+                                    WsIngressAction::EmitBatch(messages) => {
+                                        if reader_actor_ref
+                                            .tell(IngressEmitBatch::<E::Message> { messages })
+                                            .send()
+                                            .await
+                                            .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -1314,26 +1352,32 @@ where
             return Ok(());
         };
         // tracing::info!(target: "solana-ws", len = bytes.len(), "processing dispatch_endpoint");
-        match self
+        if self
             .handler
             .subscription_manager()
-            .handle_subscription_response(bytes)
+            .maybe_subscription_response(bytes)
         {
-            WsSubscriptionStatus::Acknowledged { success, message } => {
-                if !success {
-                    let msg = message.unwrap_or_else(|| "subscription failed".to_string());
-                    self.health.record_server_error(None, &msg);
-                    self.handle_disconnect(
-                        msg.clone(),
-                        WsDisconnectCause::EndpointRequested { reason: msg },
-                    )
-                    .await?;
-                    return Ok(());
+            match self
+                .handler
+                .subscription_manager()
+                .handle_subscription_response(bytes)
+            {
+                WsSubscriptionStatus::Acknowledged { success, message } => {
+                    if !success {
+                        let msg = message.unwrap_or_else(|| "subscription failed".to_string());
+                        self.health.record_server_error(None, &msg);
+                        self.handle_disconnect(
+                            msg.clone(),
+                            WsDisconnectCause::EndpointRequested { reason: msg },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    // For successful acknowledgements, continue and allow handlers to
+                    // observe the message (some adapters rely on downstream ACK events).
                 }
-                // For successful acknowledgements, continue and allow handlers to
-                // observe the message (some adapters rely on downstream ACK events).
+                WsSubscriptionStatus::NotSubscriptionResponse => {}
             }
-            WsSubscriptionStatus::NotSubscriptionResponse => {}
         }
 
         match self.handler.parse_frame(frame) {

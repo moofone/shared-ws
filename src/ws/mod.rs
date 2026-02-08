@@ -7,7 +7,20 @@ pub mod writer;
 
 use std::sync::Arc;
 
-pub use crate::core::*;
+// Public surface: keep websocket-facing API under `crate::ws::*` and avoid exposing `crate::core`.
+pub use crate::core::frame::{WsCloseFrame, WsFrame, frame_bytes, into_ws_frame};
+pub use crate::core::global_rate_limit::{
+    AcquirePermits, AcquiredPermits, SetProviderLimit, WsGlobalRateLimitHandle,
+    WsGlobalRateLimiterActor, WsProviderId, WsRateLimitConfig,
+    spawn_global_rate_limiter_supervised_with, spawn_global_rate_limiter_supervisor,
+};
+pub use crate::core::health::WsHealthMonitor;
+pub use crate::core::ping::{
+    ProtocolPingPong, WsApplicationPingPong, WsPingPongStrategy, WsPongResult,
+};
+pub use crate::core::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
+pub use crate::core::reconnect::ExponentialBackoffReconnect;
+pub use crate::core::types::*;
 
 /// Hook interface for surfacing websocket metrics without coupling to
 /// chain-specific observability actors.

@@ -25,6 +25,12 @@ where
     Ignore,
     /// Emit an application event into the actor.
     Emit(M),
+    /// Emit multiple application events into the actor.
+    ///
+    /// This is useful for protocols that batch many logical updates into a single websocket
+    /// frame (e.g., `data: [...]`). The ingress implementation decides batching; the actor
+    /// will process the batch in-order.
+    EmitBatch(Vec<M>),
     /// Forward the raw frame to the actor for full handling.
     Forward(WsFrame),
     /// Request reconnect with a reason.
@@ -302,6 +308,17 @@ pub enum WsSubscriptionStatus {
 /// Trait describing a subscription lifecycle for a websocket endpoint.
 pub trait WsSubscriptionManager: Send + Sync + 'static {
     type SubscriptionMessage: Send + 'static;
+
+    /// Fast-path precheck to decide whether `handle_subscription_response` should be attempted.
+    ///
+    /// `dispatch_endpoint` calls this for every inbound message. Returning `false` lets endpoints
+    /// skip subscription-ACK parsing for high-volume notification frames.
+    ///
+    /// Default is conservative.
+    #[inline]
+    fn maybe_subscription_response(&self, _data: &[u8]) -> bool {
+        true
+    }
 
     fn initial_subscriptions(&mut self) -> Vec<Self::SubscriptionMessage>;
 

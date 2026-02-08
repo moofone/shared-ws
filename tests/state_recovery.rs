@@ -227,15 +227,12 @@ struct NoopPing {
 }
 
 impl WsPingPongStrategy for NoopPing {
-    fn create_ping(&mut self) -> Option<shared_ws::core::WsFrame> {
+    fn create_ping(&mut self) -> Option<shared_ws::ws::WsFrame> {
         None
     }
 
-    fn handle_inbound(
-        &mut self,
-        _message: &shared_ws::core::WsFrame,
-    ) -> shared_ws::core::WsPongResult {
-        shared_ws::core::WsPongResult::NotPong
+    fn handle_inbound(&mut self, _message: &shared_ws::ws::WsFrame) -> shared_ws::ws::WsPongResult {
+        shared_ws::ws::WsPongResult::NotPong
     }
 
     fn is_stale(&self) -> bool {
@@ -354,7 +351,7 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
             delay: Duration::from_millis(10),
         },
         handler,
-        ingress: shared_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         ping_strategy: ProtocolPingPong::new(Duration::from_secs(60), Duration::from_secs(60)),
         enable_ping: false,
         stale_threshold: Duration::from_secs(30),
@@ -418,7 +415,7 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
         handler,
         // Use application-level heartbeat to avoid tungstenite's protocol-level auto-pong behavior.
         // interval > timeout ensures we trip stale after the first ping goes unanswered.
-        ingress: shared_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         ping_strategy: WsApplicationPingPong::new(
             Duration::from_millis(60),
             Duration::from_millis(20),
@@ -484,7 +481,7 @@ async fn actor_reconnects_when_no_inbound_data_for_2s() {
             delay: Duration::from_millis(10),
         },
         handler,
-        ingress: shared_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         // Enable the ping loop so it drives `CheckStale`, but avoid emitting pings:
         // we want to test stale inbound data, not stale ping/pong.
         ping_strategy: NoopPing {

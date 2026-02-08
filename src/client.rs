@@ -27,7 +27,8 @@ fn map_ws_error(context: &'static str, err: impl ToString) -> WebSocketError {
 fn close_to_core(frame: Option<TungCloseFrame>) -> Option<WsCloseFrame> {
     frame.map(|f| WsCloseFrame {
         code: u16::from(f.code),
-        reason: AsRef::<Bytes>::as_ref(&f.reason).clone(),
+        // Avoid a refcount bump / clone: we already own the close frame.
+        reason: f.reason.into(),
     })
 }
 
@@ -44,7 +45,8 @@ fn core_to_close(frame: WsCloseFrame) -> TungCloseFrame {
 
 fn msg_to_frame(msg: TungsteniteMessage) -> WsFrame {
     match msg {
-        TungsteniteMessage::Text(text) => WsFrame::Text(AsRef::<Bytes>::as_ref(&text).clone()),
+        // Avoid a refcount bump / clone: we already own the message.
+        TungsteniteMessage::Text(text) => WsFrame::Text(text.into()),
         TungsteniteMessage::Binary(bytes) => WsFrame::Binary(bytes),
         TungsteniteMessage::Ping(bytes) => WsFrame::Ping(bytes),
         TungsteniteMessage::Pong(bytes) => WsFrame::Pong(bytes),
