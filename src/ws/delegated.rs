@@ -9,8 +9,9 @@ pub enum WsConfirmMode {
     Sent,
     /// Reply only once an endpoint-specific confirmation is observed.
     ///
-    /// Sprint 1 note: confirmation matching is not yet implemented, so this will time out as
-    /// `Unconfirmed` unless the actor is extended (Sprint 2).
+    /// Note: confirmation matching is endpoint-defined. If the configured `WsEndpointHandler`
+    /// does not implement `maybe_request_response`/`match_request_response`, requests in
+    /// `Confirmed` mode will time out as `Unconfirmed`.
     Confirmed,
 }
 

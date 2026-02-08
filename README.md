@@ -11,7 +11,10 @@ transport and protocol logic cleanly separated.
   state.
 - Self-healing reconnects with handler/subscription state preserved across reconnects.
 - Pluggable ping/pong strategies (protocol-level or application-level).
-- Outbound backpressure controls (bounded queueing) and optional rate limiting / circuit breaking.
+- Delegated request API: `ask(WsDelegatedRequest)` for "send + await sent/confirmed/rejected/timeout"
+  outcomes (endpoint supplies confirmation matching).
+- Outbound backpressure controls (bounded queueing) and an optional circuit breaker for connection
+  attempts.
 - Latency policy hooks (e.g. disconnect on sustained RTT percentile breaches).
 - Opt-in instrumentation hooks:
   - `WsMetricsReporter` for forwarding metrics to any backend.
@@ -20,3 +23,5 @@ transport and protocol logic cleanly separated.
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
+- Delegated reply PRD: [`spec/DELEGATED_REPLY_WS.md`](spec/DELEGATED_REPLY_WS.md)
+- End-to-end examples: [`examples-ws/README.md`](examples-ws/README.md)

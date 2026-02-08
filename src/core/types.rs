@@ -493,7 +493,7 @@ impl WsBufferPool {
     pub fn prepare_inbound<'a>(&'a mut self, payload: &[u8]) -> WebSocketResult<&'a [u8]> {
         if payload.len() > self.inbound_capacity {
             return Err(WebSocketError::ParseFailed(format!(
-                "frame too large: {} > inbound buffer {}",
+                "inbound scratch buffer too small: payload {} > capacity {}",
                 payload.len(),
                 self.inbound_capacity
             )));

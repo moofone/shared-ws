@@ -1872,7 +1872,10 @@ pub enum WebSocketEvent {
     },
     SendMessage(WsMessage),
     SendBatch(Vec<WsMessage>),
-    /// Attempt to drain any queued outbound messages (used for rate-limit retries).
+    /// Attempt to drain any queued outbound messages.
+    ///
+    /// This is currently unused by `shared-ws` itself (the actor drains eagerly on enqueue),
+    /// but kept as an explicit event for potential external coordination/testing hooks.
     DrainOutbound,
     ServerError {
         code: Option<i32>,
@@ -1905,9 +1908,9 @@ pub struct WaitForWriter {
 
 /// Public ask-able request API: send an outbound frame and await a terminal outcome.
 ///
-/// Sprint 1 supports:
-/// - deterministic `NotDelivered` (writer send error)
-/// - `Unconfirmed` timeouts for `confirm_mode=Confirmed` (no matcher yet)
+/// - `confirm_mode=Sent`: completes once the writer accepts the frame.
+/// - `confirm_mode=Confirmed`: completes once an inbound confirmation is matched via
+///   `WsEndpointHandler::match_request_response`, or times out as `Unconfirmed`.
 impl<E, R, P, I, T> KameoMessage<WsDelegatedRequest> for WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,

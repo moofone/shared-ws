@@ -114,6 +114,9 @@ mod tests {
     #[test]
     fn ws_text_is_transparent_over_bytes() {
         assert_eq!(std::mem::size_of::<WsText>(), std::mem::size_of::<Bytes>());
-        assert_eq!(std::mem::align_of::<WsText>(), std::mem::align_of::<Bytes>());
+        assert_eq!(
+            std::mem::align_of::<WsText>(),
+            std::mem::align_of::<Bytes>()
+        );
     }
 }
