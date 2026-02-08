@@ -140,13 +140,13 @@ where
     }
 
     fn process_application(&mut self, payload: &Bytes) -> WsPongResult {
-        if let Some(key) = (self.parse_pong)(payload) {
-            if let Some(sent_at) = self.pending_pings.remove(&key) {
-                if self.oldest_pending == Some(sent_at) {
-                    self.oldest_pending = self.pending_pings.values().copied().min();
-                }
-                return WsPongResult::PongReceived(Some(sent_at.elapsed()));
+        if let Some(key) = (self.parse_pong)(payload)
+            && let Some(sent_at) = self.pending_pings.remove(&key)
+        {
+            if self.oldest_pending == Some(sent_at) {
+                self.oldest_pending = self.pending_pings.values().copied().min();
             }
+            return WsPongResult::PongReceived(Some(sent_at.elapsed()));
         }
 
         WsPongResult::NotPong

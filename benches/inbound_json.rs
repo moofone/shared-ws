@@ -151,7 +151,7 @@ fn bybit_public_trade_frame(trades: usize) -> Bytes {
         s.push_str(if (i & 1) == 0 { "false" } else { "true" });
         s.push_str(",\"BT\":");
         s.push_str(&(1700000000000u64 + i as u64).to_string());
-        s.push_str("}");
+        s.push('}');
     }
     s.push_str("]}");
     Bytes::from(s)

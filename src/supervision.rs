@@ -15,13 +15,15 @@ use kameo::{
     error::ActorStopReason,
 };
 
+type SpawnFn<A> = Box<dyn Fn(&str) -> ActorRef<A> + Send + Sync>;
+
 /// Typed link-based supervisor for homogeneous actors.
 pub struct TypedSupervisor<A>
 where
     A: Actor + Send + Sync + 'static,
 {
     _name: String,
-    _spawn_fn: Box<dyn Fn(&str) -> ActorRef<A> + Send + Sync>,
+    _spawn_fn: SpawnFn<A>,
     _phantom: PhantomData<A>,
 }
 
@@ -53,6 +55,7 @@ where
         Ok(args)
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_link_died(
         &mut self,
         _actor_ref: WeakActorRef<Self>,

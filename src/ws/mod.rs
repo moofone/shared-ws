@@ -1,26 +1,24 @@
 pub mod actor;
+pub mod delegated;
+pub(crate) mod delegated_pending;
 pub mod health;
 pub mod ping;
-pub mod rate_limit;
 pub mod types;
 pub mod writer;
 
 use std::sync::Arc;
 
 // Public surface: keep websocket-facing API under `crate::ws::*` and avoid exposing `crate::core`.
+pub use crate::core::connection_policy::{WsCircuitBreaker, jitter_delay};
 pub use crate::core::frame::{WsCloseFrame, WsFrame, WsText, frame_bytes, into_ws_frame};
-pub use crate::core::global_rate_limit::{
-    AcquirePermits, AcquiredPermits, SetProviderLimit, WsGlobalRateLimitHandle,
-    WsGlobalRateLimiterActor, WsProviderId, WsRateLimitConfig,
-    spawn_global_rate_limiter_supervised_with, spawn_global_rate_limiter_supervisor,
-};
 pub use crate::core::health::WsHealthMonitor;
 pub use crate::core::ping::{
     ProtocolPingPong, WsApplicationPingPong, WsPingPongStrategy, WsPongResult,
 };
-pub use crate::core::rate_limit::{WsCircuitBreaker, WsRateLimiter, jitter_delay};
 pub use crate::core::reconnect::ExponentialBackoffReconnect;
 pub use crate::core::types::*;
+
+pub use delegated::*;
 
 /// Hook interface for surfacing websocket metrics without coupling to
 /// chain-specific observability actors.

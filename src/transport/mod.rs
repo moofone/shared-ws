@@ -7,6 +7,9 @@ use crate::core::{WebSocketBufferConfig, WebSocketError, WsFrame, WsTlsConfig};
 
 pub mod tungstenite;
 
+pub type WsTransportConnectFuture<R, W> =
+    Pin<Box<dyn Future<Output = Result<(R, W), WebSocketError>> + Send>>;
+
 /// Transport boundary for websocket IO.
 ///
 /// The IO loop is expected to live outside kameo; the actor owns state and policies.
@@ -22,5 +25,5 @@ pub trait WsTransport: Clone + Send + Sync + 'static {
         url: String,
         buffers: WebSocketBufferConfig,
         tls: WsTlsConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<(Self::Reader, Self::Writer), WebSocketError>> + Send>>;
+    ) -> WsTransportConnectFuture<Self::Reader, Self::Writer>;
 }

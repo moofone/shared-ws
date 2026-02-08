@@ -37,6 +37,7 @@ where
         Ok(args)
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn on_panic(
         &mut self,
         _actor_ref: kameo::actor::WeakActorRef<Self>,
