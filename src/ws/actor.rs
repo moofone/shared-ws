@@ -467,6 +467,27 @@ where
     }
 }
 
+pub struct GetConnectionStatus;
+
+impl<E, R, P, I, T> KameoMessage<GetConnectionStatus> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<WsConnectionStatus>;
+
+    async fn handle(
+        &mut self,
+        _message: GetConnectionStatus,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.status)
+    }
+}
+
 impl<E, R, P, I, T> WebSocketActor<E, R, P, I, T>
 where
     E: WsEndpointHandler,
@@ -544,6 +565,7 @@ where
     }
 
     async fn handle_connect(&mut self) -> WebSocketResult<()> {
+        self.health.record_connect_attempt();
         if let Some(cb) = self.circuit_breaker.as_mut() {
             if !cb.can_proceed() {
                 if let Some(delay) = cb.time_until_retry() {
@@ -642,7 +664,7 @@ where
             return;
         }
 
-        let mut delay = match action {
+        let delay = match action {
             WsDisconnectAction::ImmediateReconnect => Duration::from_secs(0),
             WsDisconnectAction::BackoffReconnect => jitter_delay(self.reconnect.next_delay()),
             WsDisconnectAction::Abort => Duration::from_secs(0),
@@ -651,15 +673,6 @@ where
         let attempt = self.reconnect_attempt.saturating_add(1);
         self.reconnect_attempt = attempt;
         self.health.increment_reconnect();
-
-        if attempt >= 3 {
-            warn!(
-                connection = %self.connection_label(),
-                attempt,
-                "websocket quarantine: too many failed attempts, suspending for 24h"
-            );
-            delay = Duration::from_secs(86400);
-        }
 
         self.log_reconnect_plan(
             event,
@@ -686,6 +699,7 @@ where
         writer: T::Writer,
     ) -> WebSocketResult<()> {
         info!("websocket connection established");
+        self.health.record_connect_success();
         if let Some(cb) = self.circuit_breaker.as_mut() {
             cb.record_success();
         }
@@ -1287,7 +1301,7 @@ where
                         )));
                     }
                     // Zero-copy: parse directly on the tungstenite frame bytes.
-                    self.dispatch_endpoint(bytes).await?;
+                    self.dispatch_endpoint(&message).await?;
                 }
             }
         }
@@ -1295,7 +1309,10 @@ where
         Ok(())
     }
 
-    async fn dispatch_endpoint(&mut self, bytes: &[u8]) -> WebSocketResult<()> {
+    async fn dispatch_endpoint(&mut self, frame: &WsMessage) -> WebSocketResult<()> {
+        let Some(bytes) = message_bytes(frame) else {
+            return Ok(());
+        };
         // tracing::info!(target: "solana-ws", len = bytes.len(), "processing dispatch_endpoint");
         match self
             .handler
@@ -1319,7 +1336,7 @@ where
             WsSubscriptionStatus::NotSubscriptionResponse => {}
         }
 
-        match self.handler.parse(bytes) {
+        match self.handler.parse_frame(frame) {
             Ok(WsParseOutcome::ServerError {
                 code,
                 message,
@@ -1653,6 +1670,8 @@ mod latency_tests {
             uptime: Duration::from_secs(0),
             messages: 0,
             errors: 0,
+            connect_attempts: 0,
+            connect_successes: 0,
             reconnects: 0,
             last_message_age: Duration::from_secs(0),
             recent_server_errors: 0,

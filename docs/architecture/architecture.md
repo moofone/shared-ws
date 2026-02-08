@@ -1,4 +1,4 @@
-# defi-ws Architecture
+# shared-ws Architecture
 
 This crate provides a high-performance WebSocket connection manager designed for:
 

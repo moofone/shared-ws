@@ -42,6 +42,8 @@ pub struct WsHealthMonitor {
     stale_threshold: Duration,
     message_count: u64,
     error_count: u64,
+    connect_attempts: u64,
+    connect_successes: u64,
     reconnect_count: u64,
     server_errors: CircularBuffer<ServerErrorRec>,
     internal_errors: CircularBuffer<InternalErrorRec>,
@@ -58,6 +60,8 @@ impl WsHealthMonitor {
             stale_threshold,
             message_count: 0,
             error_count: 0,
+            connect_attempts: 0,
+            connect_successes: 0,
             reconnect_count: 0,
             server_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
             internal_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
@@ -71,6 +75,14 @@ impl WsHealthMonitor {
         self.connection_started = now;
         self.last_message_received = now;
         self.last_message_sent = now;
+    }
+
+    pub fn record_connect_attempt(&mut self) {
+        self.connect_attempts = self.connect_attempts.saturating_add(1);
+    }
+
+    pub fn record_connect_success(&mut self) {
+        self.connect_successes = self.connect_successes.saturating_add(1);
     }
 
     pub fn record_message(&mut self) {
@@ -145,6 +157,8 @@ impl WsHealthMonitor {
             uptime: self.connection_started.elapsed(),
             messages: self.message_count,
             errors: self.error_count,
+            connect_attempts: self.connect_attempts,
+            connect_successes: self.connect_successes,
             reconnects: self.reconnect_count,
             last_message_age: self.last_message_received.elapsed(),
             recent_server_errors: self.server_errors.len(),

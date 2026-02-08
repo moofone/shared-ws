@@ -2,7 +2,7 @@ use bytes::Bytes;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use sonic_rs::Value;
 
-use defi_ws::core::{
+use shared_ws::core::{
     WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsMessageAction,
     WsParseOutcome, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
 };

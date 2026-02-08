@@ -7,6 +7,7 @@ use sonic_rs::Value;
 use thiserror::Error;
 
 use super::frame::WsFrame;
+use super::frame::frame_bytes;
 
 /// Convenience result alias for websocket operations.
 pub type WebSocketResult<T> = Result<T, WebSocketError>;
@@ -200,6 +201,10 @@ pub struct WsConnectionStats {
     pub uptime: Duration,
     pub messages: u64,
     pub errors: u64,
+    /// Number of connection attempts initiated by the websocket actor.
+    pub connect_attempts: u64,
+    /// Number of successful handshakes completed by the websocket actor.
+    pub connect_successes: u64,
     pub reconnects: u64,
     pub last_message_age: Duration,
     pub recent_server_errors: usize,
@@ -321,6 +326,21 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
     fn generate_auth(&self) -> Option<Vec<u8>>;
 
     fn parse(&mut self, data: &[u8]) -> Result<WsParseOutcome<Self::Message>, Self::Error>;
+
+    /// Optional parse entrypoint that can leverage the transport-neutral `WsFrame`.
+    ///
+    /// Default behavior forwards to `parse(&[u8])` when the frame has a payload.
+    /// Override this to enable zero-copy propagation of the underlying `Bytes`.
+    #[inline]
+    fn parse_frame(
+        &mut self,
+        frame: &WsFrame,
+    ) -> Result<WsParseOutcome<Self::Message>, Self::Error> {
+        let Some(bytes) = frame_bytes(frame) else {
+            return Ok(WsParseOutcome::Message(WsMessageAction::Continue));
+        };
+        self.parse(bytes)
+    }
 
     fn handle_message(&mut self, msg: Self::Message) -> Result<(), Self::Error>;
 

@@ -1,12 +1,12 @@
 use bytes::Bytes;
-use defi_ws::transport::tungstenite::TungsteniteTransport;
-use defi_ws::ws::{
+use kameo::Actor;
+use shared_ws::transport::tungstenite::TungsteniteTransport;
+use shared_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
     WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsMessage,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
     WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
-use kameo::Actor;
 use std::io;
 use std::time::Duration;
 use thiserror::Error;
@@ -138,7 +138,7 @@ async fn inbound_processing_is_zero_copy() {
         transport: TungsteniteTransport::default(),
         reconnect_strategy: reconnect,
         handler,
-        ingress: defi_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::core::ForwardAllIngress::default(),
         ping_strategy: ping,
         enable_ping: true,
         stale_threshold: Duration::from_secs(30),
