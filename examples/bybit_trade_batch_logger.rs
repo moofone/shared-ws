@@ -5,7 +5,7 @@ use bytes::Bytes;
 use sonic_rs::{JsonValueTrait, PointerTree};
 
 use shared_ws::client;
-use shared_ws::ws::WsFrame;
+use shared_ws::ws::{WsFrame, into_ws_frame};
 
 #[inline]
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
             .join(",")
     );
-    ws.send(WsFrame::Text(Bytes::from(sub))).await?;
+    ws.send(into_ws_frame(Bytes::from(sub))).await?;
     println!("subscribed: {}", args.join(", "));
     println!("dump mode: {dump}");
     println!("tick_ms: {tick_ms}");
@@ -149,9 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         if last_ping.elapsed() >= Duration::from_secs(20) {
-            let _ = ws
-                .send(WsFrame::Text(Bytes::from_static(br#"{"op":"ping"}"#)))
-                .await;
+            let _ = ws.send(WsFrame::text_static("{\"op\":\"ping\"}")).await;
             last_ping = Instant::now();
         }
 
@@ -161,13 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let frame = frame?;
 
-        let WsFrame::Text(bytes) = frame else {
+        let WsFrame::Text(text) = frame else {
             continue;
         };
 
-        let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
-            continue;
-        };
+        let text = text.as_str();
 
         // Cheap filter to avoid parsing non-trade traffic (ack/pong/etc).
         if !text.contains("\"topic\":\"publicTrade.") {

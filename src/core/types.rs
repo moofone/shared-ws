@@ -344,6 +344,15 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
 
     fn parse(&mut self, data: &[u8]) -> Result<WsParseOutcome<Self::Message>, Self::Error>;
 
+    /// Optional parse entrypoint for validated text frames.
+    ///
+    /// The default implementation forwards to `parse(&[u8])`. Override this to use APIs that
+    /// benefit from `&str` input (e.g. JSON parsers that can skip UTF-8 validation).
+    #[inline]
+    fn parse_text(&mut self, text: &str) -> Result<WsParseOutcome<Self::Message>, Self::Error> {
+        self.parse(text.as_bytes())
+    }
+
     /// Optional parse entrypoint that can leverage the transport-neutral `WsFrame`.
     ///
     /// Default behavior forwards to `parse(&[u8])` when the frame has a payload.
@@ -353,6 +362,9 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
         &mut self,
         frame: &WsFrame,
     ) -> Result<WsParseOutcome<Self::Message>, Self::Error> {
+        if let WsFrame::Text(text) = frame {
+            return self.parse_text(text.as_str());
+        }
         let Some(bytes) = frame_bytes(frame) else {
             return Ok(WsParseOutcome::Message(WsMessageAction::Continue));
         };

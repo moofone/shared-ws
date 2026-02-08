@@ -4,7 +4,7 @@ use tokio_tungstenite::tungstenite::{
     Message as TungMessage, Utf8Bytes, protocol::CloseFrame as TungCloseFrame,
 };
 
-use shared_ws::ws::{WsCloseFrame, WsFrame};
+use shared_ws::ws::{WsCloseFrame, WsFrame, WsText};
 
 #[inline]
 fn close_to_core_clone(frame: Option<TungCloseFrame>) -> Option<WsCloseFrame> {
@@ -25,7 +25,11 @@ fn close_to_core_move(frame: Option<TungCloseFrame>) -> Option<WsCloseFrame> {
 #[inline]
 fn msg_to_frame_clone(msg: TungMessage) -> WsFrame {
     match msg {
-        TungMessage::Text(text) => WsFrame::Text(AsRef::<Bytes>::as_ref(&text).clone()),
+        TungMessage::Text(text) => {
+            let bytes = AsRef::<Bytes>::as_ref(&text).clone();
+            // SAFETY: `text` is validated UTF-8; we cloned the underlying bytes.
+            WsFrame::Text(unsafe { WsText::from_bytes_unchecked(bytes) })
+        }
         TungMessage::Binary(bytes) => WsFrame::Binary(bytes),
         TungMessage::Ping(bytes) => WsFrame::Ping(bytes),
         TungMessage::Pong(bytes) => WsFrame::Pong(bytes),
@@ -37,7 +41,10 @@ fn msg_to_frame_clone(msg: TungMessage) -> WsFrame {
 #[inline]
 fn msg_to_frame_move(msg: TungMessage) -> WsFrame {
     match msg {
-        TungMessage::Text(text) => WsFrame::Text(text.into()),
+        TungMessage::Text(text) => {
+            // SAFETY: tungstenite `Text` payloads are validated UTF-8.
+            WsFrame::Text(unsafe { WsText::from_bytes_unchecked(text.into()) })
+        }
         TungMessage::Binary(bytes) => WsFrame::Binary(bytes),
         TungMessage::Ping(bytes) => WsFrame::Ping(bytes),
         TungMessage::Pong(bytes) => WsFrame::Pong(bytes),

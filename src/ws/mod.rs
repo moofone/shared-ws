@@ -8,7 +8,7 @@ pub mod writer;
 use std::sync::Arc;
 
 // Public surface: keep websocket-facing API under `crate::ws::*` and avoid exposing `crate::core`.
-pub use crate::core::frame::{WsCloseFrame, WsFrame, frame_bytes, into_ws_frame};
+pub use crate::core::frame::{WsCloseFrame, WsFrame, WsText, frame_bytes, into_ws_frame};
 pub use crate::core::global_rate_limit::{
     AcquirePermits, AcquiredPermits, SetProviderLimit, WsGlobalRateLimitHandle,
     WsGlobalRateLimiterActor, WsProviderId, WsRateLimitConfig,
