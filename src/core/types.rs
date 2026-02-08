@@ -7,6 +7,7 @@ use sonic_rs::Value;
 use thiserror::Error;
 
 use super::frame::WsFrame;
+use super::frame::frame_bytes;
 
 /// Convenience result alias for websocket operations.
 pub type WebSocketResult<T> = Result<T, WebSocketError>;
@@ -24,6 +25,12 @@ where
     Ignore,
     /// Emit an application event into the actor.
     Emit(M),
+    /// Emit multiple application events into the actor.
+    ///
+    /// This is useful for protocols that batch many logical updates into a single websocket
+    /// frame (e.g., `data: [...]`). The ingress implementation decides batching; the actor
+    /// will process the batch in-order.
+    EmitBatch(Vec<M>),
     /// Forward the raw frame to the actor for full handling.
     Forward(WsFrame),
     /// Request reconnect with a reason.
@@ -200,6 +207,10 @@ pub struct WsConnectionStats {
     pub uptime: Duration,
     pub messages: u64,
     pub errors: u64,
+    /// Number of connection attempts initiated by the websocket actor.
+    pub connect_attempts: u64,
+    /// Number of successful handshakes completed by the websocket actor.
+    pub connect_successes: u64,
     pub reconnects: u64,
     pub last_message_age: Duration,
     pub recent_server_errors: usize,
@@ -298,6 +309,17 @@ pub enum WsSubscriptionStatus {
 pub trait WsSubscriptionManager: Send + Sync + 'static {
     type SubscriptionMessage: Send + 'static;
 
+    /// Fast-path precheck to decide whether `handle_subscription_response` should be attempted.
+    ///
+    /// `dispatch_endpoint` calls this for every inbound message. Returning `false` lets endpoints
+    /// skip subscription-ACK parsing for high-volume notification frames.
+    ///
+    /// Default is conservative.
+    #[inline]
+    fn maybe_subscription_response(&self, _data: &[u8]) -> bool {
+        true
+    }
+
     fn initial_subscriptions(&mut self) -> Vec<Self::SubscriptionMessage>;
 
     fn update_subscriptions(
@@ -321,6 +343,33 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
     fn generate_auth(&self) -> Option<Vec<u8>>;
 
     fn parse(&mut self, data: &[u8]) -> Result<WsParseOutcome<Self::Message>, Self::Error>;
+
+    /// Optional parse entrypoint for validated text frames.
+    ///
+    /// The default implementation forwards to `parse(&[u8])`. Override this to use APIs that
+    /// benefit from `&str` input (e.g. JSON parsers that can skip UTF-8 validation).
+    #[inline]
+    fn parse_text(&mut self, text: &str) -> Result<WsParseOutcome<Self::Message>, Self::Error> {
+        self.parse(text.as_bytes())
+    }
+
+    /// Optional parse entrypoint that can leverage the transport-neutral `WsFrame`.
+    ///
+    /// Default behavior forwards to `parse(&[u8])` when the frame has a payload.
+    /// Override this to enable zero-copy propagation of the underlying `Bytes`.
+    #[inline]
+    fn parse_frame(
+        &mut self,
+        frame: &WsFrame,
+    ) -> Result<WsParseOutcome<Self::Message>, Self::Error> {
+        if let WsFrame::Text(text) = frame {
+            return self.parse_text(text.as_str());
+        }
+        let Some(bytes) = frame_bytes(frame) else {
+            return Ok(WsParseOutcome::Message(WsMessageAction::Continue));
+        };
+        self.parse(bytes)
+    }
 
     fn handle_message(&mut self, msg: Self::Message) -> Result<(), Self::Error>;
 

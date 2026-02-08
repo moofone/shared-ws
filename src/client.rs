@@ -14,7 +14,7 @@ use tokio_tungstenite::{
     },
 };
 
-use crate::core::{WebSocketError, WsCloseFrame, WsFrame};
+use crate::core::{WebSocketError, WsCloseFrame, WsFrame, WsText};
 use crate::tls::install_rustls_crypto_provider;
 
 fn map_ws_error(context: &'static str, err: impl ToString) -> WebSocketError {
@@ -27,7 +27,8 @@ fn map_ws_error(context: &'static str, err: impl ToString) -> WebSocketError {
 fn close_to_core(frame: Option<TungCloseFrame>) -> Option<WsCloseFrame> {
     frame.map(|f| WsCloseFrame {
         code: u16::from(f.code),
-        reason: AsRef::<Bytes>::as_ref(&f.reason).clone(),
+        // Avoid a refcount bump / clone: we already own the close frame.
+        reason: f.reason.into(),
     })
 }
 
@@ -44,7 +45,11 @@ fn core_to_close(frame: WsCloseFrame) -> TungCloseFrame {
 
 fn msg_to_frame(msg: TungsteniteMessage) -> WsFrame {
     match msg {
-        TungsteniteMessage::Text(text) => WsFrame::Text(AsRef::<Bytes>::as_ref(&text).clone()),
+        // Avoid a refcount bump / clone: we already own the message.
+        TungsteniteMessage::Text(text) => {
+            // SAFETY: tungstenite `Text` payloads are validated UTF-8.
+            WsFrame::Text(unsafe { WsText::from_bytes_unchecked(text.into()) })
+        }
         TungsteniteMessage::Binary(bytes) => WsFrame::Binary(bytes),
         TungsteniteMessage::Ping(bytes) => WsFrame::Ping(bytes),
         TungsteniteMessage::Pong(bytes) => WsFrame::Pong(bytes),
@@ -55,14 +60,10 @@ fn msg_to_frame(msg: TungsteniteMessage) -> WsFrame {
 
 fn frame_to_msg(frame: WsFrame) -> TungsteniteMessage {
     match frame {
-        WsFrame::Text(bytes) => {
-            // Bulletproof: avoid UB even if callers misuse WsFrame::Text.
-            match std::str::from_utf8(bytes.as_ref()) {
-                Ok(_) => {
-                    TungsteniteMessage::Text(unsafe { Utf8Bytes::from_bytes_unchecked(bytes) })
-                }
-                Err(_) => TungsteniteMessage::Binary(bytes),
-            }
+        WsFrame::Text(text) => {
+            let bytes = text.into_bytes();
+            // SAFETY: `WsText` is UTF-8 validated by construction.
+            TungsteniteMessage::Text(unsafe { Utf8Bytes::from_bytes_unchecked(bytes) })
         }
         WsFrame::Binary(bytes) => TungsteniteMessage::Binary(bytes),
         WsFrame::Ping(bytes) => TungsteniteMessage::Ping(bytes),

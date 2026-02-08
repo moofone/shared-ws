@@ -139,8 +139,8 @@ where
         self.oldest_pending = self.pending_pings.values().copied().min();
     }
 
-    fn process_application(&mut self, payload: Bytes) -> WsPongResult {
-        if let Some(key) = (self.parse_pong)(&payload) {
+    fn process_application(&mut self, payload: &Bytes) -> WsPongResult {
+        if let Some(key) = (self.parse_pong)(payload) {
             if let Some(sent_at) = self.pending_pings.remove(&key) {
                 if self.oldest_pending == Some(sent_at) {
                     self.oldest_pending = self.pending_pings.values().copied().min();
@@ -174,8 +174,8 @@ where
 
     fn handle_inbound(&mut self, message: &WsFrame) -> WsPongResult {
         match message {
-            WsFrame::Text(bytes) => self.process_application(bytes.clone()),
-            WsFrame::Binary(bytes) => self.process_application(bytes.clone()),
+            WsFrame::Text(text) => self.process_application(text.as_bytes()),
+            WsFrame::Binary(bytes) => self.process_application(bytes),
             _ => WsPongResult::NotPong,
         }
     }
@@ -262,9 +262,8 @@ mod tests {
         let second = strategy.create_ping();
         assert!(second.is_none(), "max pending should block new ping");
 
-        let pong = match outbound {
-            WsFrame::Text(bytes) => WsFrame::Text(bytes),
-            WsFrame::Binary(bytes) => WsFrame::Binary(bytes),
+        let pong = match &outbound {
+            WsFrame::Text(_) | WsFrame::Binary(_) => outbound.clone(),
             other => panic!("expected text/binary payload, got {other:?}"),
         };
 

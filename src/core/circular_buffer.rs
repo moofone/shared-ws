@@ -7,11 +7,14 @@ use std::ops::Index;
 /// - `push` is O(1) and evicts from the front when full.
 /// - Memory usage is bounded by `capacity`.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CircularBuffer<T> {
+pub(crate) struct CircularBuffer<T> {
     buffer: VecDeque<T>,
     capacity: usize,
 }
 
+// This is a small internal utility used by `WsHealthMonitor`. We keep extra helpers around
+// for debugging/testing ergonomics without forcing them to be used everywhere.
+#[allow(dead_code)]
 impl<T> CircularBuffer<T> {
     pub fn new(capacity: usize) -> Self {
         Self {

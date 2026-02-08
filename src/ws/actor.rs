@@ -381,6 +381,11 @@ pub struct IngressEmit<M: Send + 'static> {
     pub message: M,
 }
 
+#[derive(Debug)]
+pub struct IngressEmitBatch<M: Send + 'static> {
+    pub messages: Vec<M>,
+}
+
 pub(crate) struct ConnectionFailed {
     pub(crate) error: String,
     pub(crate) status: Option<u16>,
@@ -446,6 +451,29 @@ where
     }
 }
 
+impl<E, R, P, I, T> KameoMessage<IngressEmitBatch<E::Message>> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<()>;
+
+    async fn handle(
+        &mut self,
+        msg: IngressEmitBatch<E::Message>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        for m in msg.messages {
+            self.handle_message_action(WsMessageAction::Process(m))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 pub struct GetConnectionStats;
 
 impl<E, R, P, I, T> KameoMessage<GetConnectionStats> for WebSocketActor<E, R, P, I, T>
@@ -464,6 +492,27 @@ where
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.health.get_stats())
+    }
+}
+
+pub struct GetConnectionStatus;
+
+impl<E, R, P, I, T> KameoMessage<GetConnectionStatus> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<WsConnectionStatus>;
+
+    async fn handle(
+        &mut self,
+        _message: GetConnectionStatus,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.status)
     }
 }
 
@@ -544,6 +593,7 @@ where
     }
 
     async fn handle_connect(&mut self) -> WebSocketResult<()> {
+        self.health.record_connect_attempt();
         if let Some(cb) = self.circuit_breaker.as_mut() {
             if !cb.can_proceed() {
                 if let Some(delay) = cb.time_until_retry() {
@@ -642,7 +692,7 @@ where
             return;
         }
 
-        let mut delay = match action {
+        let delay = match action {
             WsDisconnectAction::ImmediateReconnect => Duration::from_secs(0),
             WsDisconnectAction::BackoffReconnect => jitter_delay(self.reconnect.next_delay()),
             WsDisconnectAction::Abort => Duration::from_secs(0),
@@ -651,15 +701,6 @@ where
         let attempt = self.reconnect_attempt.saturating_add(1);
         self.reconnect_attempt = attempt;
         self.health.increment_reconnect();
-
-        if attempt >= 3 {
-            warn!(
-                connection = %self.connection_label(),
-                attempt,
-                "websocket quarantine: too many failed attempts, suspending for 24h"
-            );
-            delay = Duration::from_secs(86400);
-        }
 
         self.log_reconnect_plan(
             event,
@@ -686,6 +727,7 @@ where
         writer: T::Writer,
     ) -> WebSocketResult<()> {
         info!("websocket connection established");
+        self.health.record_connect_success();
         if let Some(cb) = self.circuit_breaker.as_mut() {
             cb.record_success();
         }
@@ -779,6 +821,16 @@ where
                                             .send()
                                             .await
                                             .is_err() {
+                                            break;
+                                        }
+                                    }
+                                    WsIngressAction::EmitBatch(messages) => {
+                                        if reader_actor_ref
+                                            .tell(IngressEmitBatch::<E::Message> { messages })
+                                            .send()
+                                            .await
+                                            .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -1287,7 +1339,7 @@ where
                         )));
                     }
                     // Zero-copy: parse directly on the tungstenite frame bytes.
-                    self.dispatch_endpoint(bytes).await?;
+                    self.dispatch_endpoint(&message).await?;
                 }
             }
         }
@@ -1295,31 +1347,40 @@ where
         Ok(())
     }
 
-    async fn dispatch_endpoint(&mut self, bytes: &[u8]) -> WebSocketResult<()> {
+    async fn dispatch_endpoint(&mut self, frame: &WsMessage) -> WebSocketResult<()> {
+        let Some(bytes) = message_bytes(frame) else {
+            return Ok(());
+        };
         // tracing::info!(target: "solana-ws", len = bytes.len(), "processing dispatch_endpoint");
-        match self
+        if self
             .handler
             .subscription_manager()
-            .handle_subscription_response(bytes)
+            .maybe_subscription_response(bytes)
         {
-            WsSubscriptionStatus::Acknowledged { success, message } => {
-                if !success {
-                    let msg = message.unwrap_or_else(|| "subscription failed".to_string());
-                    self.health.record_server_error(None, &msg);
-                    self.handle_disconnect(
-                        msg.clone(),
-                        WsDisconnectCause::EndpointRequested { reason: msg },
-                    )
-                    .await?;
-                    return Ok(());
+            match self
+                .handler
+                .subscription_manager()
+                .handle_subscription_response(bytes)
+            {
+                WsSubscriptionStatus::Acknowledged { success, message } => {
+                    if !success {
+                        let msg = message.unwrap_or_else(|| "subscription failed".to_string());
+                        self.health.record_server_error(None, &msg);
+                        self.handle_disconnect(
+                            msg.clone(),
+                            WsDisconnectCause::EndpointRequested { reason: msg },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    // For successful acknowledgements, continue and allow handlers to
+                    // observe the message (some adapters rely on downstream ACK events).
                 }
-                // For successful acknowledgements, continue and allow handlers to
-                // observe the message (some adapters rely on downstream ACK events).
+                WsSubscriptionStatus::NotSubscriptionResponse => {}
             }
-            WsSubscriptionStatus::NotSubscriptionResponse => {}
         }
 
-        match self.handler.parse(bytes) {
+        match self.handler.parse_frame(frame) {
             Ok(WsParseOutcome::ServerError {
                 code,
                 message,
@@ -1653,6 +1714,8 @@ mod latency_tests {
             uptime: Duration::from_secs(0),
             messages: 0,
             errors: 0,
+            connect_attempts: 0,
+            connect_successes: 0,
             reconnects: 0,
             last_message_age: Duration::from_secs(0),
             recent_server_errors: 0,

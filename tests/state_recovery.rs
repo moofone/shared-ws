@@ -6,15 +6,15 @@ use std::sync::{
 use std::time::Duration;
 
 use bytes::Bytes;
-use defi_ws::client::accept_async;
-use defi_ws::transport::tungstenite::TungsteniteTransport;
-use defi_ws::ws::{
+use kameo::Actor;
+use shared_ws::client::accept_async;
+use shared_ws::transport::tungstenite::TungsteniteTransport;
+use shared_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
     WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction,
     WsMessage, WsMessageAction, WsParseOutcome, WsPingPongStrategy, WsReconnectStrategy,
     WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
 };
-use kameo::Actor;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -82,7 +82,7 @@ async fn spawn_ws_server(mode: ServerMode) -> (SocketAddr, mpsc::UnboundedReceiv
                                         // Zero-copy: tungstenite text frames are backed by refcounted bytes.
                                         let _ = tx.send(ServerEvent::Data {
                                             conn_id,
-                                            bytes: text.clone(),
+                                            bytes: text.as_bytes().clone(),
                                         });
                                     }
                                     Ok(WsMessage::Close(_)) => break,
@@ -108,7 +108,7 @@ async fn spawn_ws_server(mode: ServerMode) -> (SocketAddr, mpsc::UnboundedReceiv
                                 // Zero-copy: tungstenite text frames are backed by refcounted bytes.
                                 let _ = tx.send(ServerEvent::Data {
                                     conn_id,
-                                    bytes: text.clone(),
+                                    bytes: text.as_bytes().clone(),
                                 });
                             }
                             Ok(WsMessage::Close(_)) => break,
@@ -227,12 +227,12 @@ struct NoopPing {
 }
 
 impl WsPingPongStrategy for NoopPing {
-    fn create_ping(&mut self) -> Option<defi_ws::core::WsFrame> {
+    fn create_ping(&mut self) -> Option<shared_ws::ws::WsFrame> {
         None
     }
 
-    fn handle_inbound(&mut self, _message: &defi_ws::core::WsFrame) -> defi_ws::core::WsPongResult {
-        defi_ws::core::WsPongResult::NotPong
+    fn handle_inbound(&mut self, _message: &shared_ws::ws::WsFrame) -> shared_ws::ws::WsPongResult {
+        shared_ws::ws::WsPongResult::NotPong
     }
 
     fn is_stale(&self) -> bool {
@@ -351,7 +351,7 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
             delay: Duration::from_millis(10),
         },
         handler,
-        ingress: defi_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         ping_strategy: ProtocolPingPong::new(Duration::from_secs(60), Duration::from_secs(60)),
         enable_ping: false,
         stale_threshold: Duration::from_secs(30),
@@ -372,7 +372,7 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
 
     // Apply an update while connected; it should persist across reconnect even if not sent yet.
     actor
-        .tell(defi_ws::ws::WsSubscriptionUpdate {
+        .tell(shared_ws::ws::WsSubscriptionUpdate {
             action: WsSubscriptionAction::Add(vec![b"sub1".to_vec()]),
         })
         .send()
@@ -415,7 +415,7 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
         handler,
         // Use application-level heartbeat to avoid tungstenite's protocol-level auto-pong behavior.
         // interval > timeout ensures we trip stale after the first ping goes unanswered.
-        ingress: defi_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         ping_strategy: WsApplicationPingPong::new(
             Duration::from_millis(60),
             Duration::from_millis(20),
@@ -442,7 +442,7 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
 
     // Update desired state before the stale disconnect fires.
     actor
-        .tell(defi_ws::ws::WsSubscriptionUpdate {
+        .tell(shared_ws::ws::WsSubscriptionUpdate {
             action: WsSubscriptionAction::Add(vec![b"sub1".to_vec()]),
         })
         .send()
@@ -481,7 +481,7 @@ async fn actor_reconnects_when_no_inbound_data_for_2s() {
             delay: Duration::from_millis(10),
         },
         handler,
-        ingress: defi_ws::core::ForwardAllIngress::default(),
+        ingress: shared_ws::ws::ForwardAllIngress::default(),
         // Enable the ping loop so it drives `CheckStale`, but avoid emitting pings:
         // we want to test stale inbound data, not stale ping/pong.
         ping_strategy: NoopPing {
