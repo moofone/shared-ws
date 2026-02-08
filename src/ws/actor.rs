@@ -1341,11 +1341,14 @@ where
             }
             WsPongResult::NotPong => {
                 if let Some(bytes) = message_bytes(&message) {
-                    if bytes.len() > self.buffers.inbound_capacity() {
+                    // This is a transport-independent guardrail. Do not tie it to the actor's
+                    // scratch buffer size: in the zero-copy path we parse directly on transport
+                    // bytes, and transports may allow `max_message_bytes > read_buffer_bytes`.
+                    if bytes.len() > self.ws_buffers.max_message_bytes {
                         return Err(WebSocketError::ParseFailed(format!(
-                            "frame too large: {} > inbound buffer {}",
+                            "frame too large: {} > max message {}",
                             bytes.len(),
-                            self.buffers.inbound_capacity()
+                            self.ws_buffers.max_message_bytes
                         )));
                     }
                     // Zero-copy: parse directly on the tungstenite frame bytes.

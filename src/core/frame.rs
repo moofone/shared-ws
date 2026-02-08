@@ -4,6 +4,7 @@ use bytes::Bytes;
 ///
 /// This is a zero-cost wrapper around `Bytes` that carries the invariant that the payload is
 /// valid UTF-8. It enables downstream parsing to safely skip redundant UTF-8 validation.
+#[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WsText(Bytes);
 
@@ -103,5 +104,16 @@ where
         WsFrame::Text(unsafe { WsText::from_bytes_unchecked(payload) })
     } else {
         WsFrame::Binary(payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_text_is_transparent_over_bytes() {
+        assert_eq!(std::mem::size_of::<WsText>(), std::mem::size_of::<Bytes>());
+        assert_eq!(std::mem::align_of::<WsText>(), std::mem::align_of::<Bytes>());
     }
 }
