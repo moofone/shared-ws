@@ -9,7 +9,7 @@ bytes = "1.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 hdrhistogram = "7.5"
 http = "1"
-kameo = { git = "https://github.com/moofone/kameo", branch = "main", features = ["remote"] }
+kameo = { git = "https://github.com/moofone/kameo", rev = "ee74f3e4e21efe4f456e6eeb1f7e68cb24322186", features = ["remote"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 sonic-rs = "0.5.6"

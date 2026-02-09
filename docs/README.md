@@ -36,14 +36,13 @@ use std::time::Duration;
 use shared_ws::transport::tungstenite::TungsteniteTransport;
 use shared_ws::ws::{
     ExponentialBackoffReconnect, ForwardAllIngress, ProtocolPingPong, WebSocketActor,
-    WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent, WsTlsConfig,
+    WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
 };
 
 // 1) Implement WsSubscriptionManager + WsEndpointHandler (see below).
 // 2) Pick ingress/ping/reconnect/transport.
 let actor = WebSocketActor::spawn(WebSocketActorArgs {
     url: "wss://example".to_string(),
-    tls: WsTlsConfig::default(),
     transport: TungsteniteTransport::default(),
     reconnect_strategy: ExponentialBackoffReconnect::default(),
     handler: /* your handler */ todo!(),
@@ -206,11 +205,11 @@ Ask-able messages on `WebSocketActor`:
 
 - `GetConnectionStatus -> WsConnectionStatus` (`Connecting | Connected | Disconnected`)
 - `GetConnectionStats -> WsConnectionStats` (uptime, last message age, reconnect count, error buffers, RTT percentiles)
-- `WaitForWriter { timeout } -> ()` (readiness gate: writer exists and can accept writes)
+- `WaitForWriter { timeout } -> ()` (readiness gate: actor is ready for application writes; may wait across reconnects)
 
 Typical patterns:
 
-- **Readiness**: `WaitForWriter` + `GetConnectionStatus == Connected`
+- **Readiness**: `GetConnectionStatus == Connected` (or `WaitForWriter`)
 - **Liveness**: process is up; optionally require “not permanently disconnected”
 - **Degraded**: high `last_message_age`, frequent reconnects, or recent server/internal errors
 
@@ -235,5 +234,5 @@ Default transport:
 
 Custom transports:
 
-- implement `WsTransport` and provide `connect(url, buffers, tls) -> Future<Reader, Writer>`
+- implement `WsTransport` and provide `connect(url, buffers) -> Future<Reader, Writer>`
 - `Reader` yields `WsFrame` values; `Writer` is a `Sink<WsFrame>`

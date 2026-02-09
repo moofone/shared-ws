@@ -13,7 +13,7 @@ use shared_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
     WsApplicationPingPong, WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction,
     WsMessage, WsMessageAction, WsParseOutcome, WsPingPongStrategy, WsReconnectStrategy,
-    WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
+    WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -345,7 +345,6 @@ async fn actor_state_survives_remote_close_and_resubscribes() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: format!("ws://{}", addr),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: FastReconnect {
             delay: Duration::from_millis(10),
@@ -405,7 +404,6 @@ async fn actor_self_heals_after_stale_ping_and_resubscribes() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: format!("ws://{}", addr),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: FastReconnect {
             delay: Duration::from_millis(10),
@@ -471,7 +469,6 @@ async fn actor_reconnects_when_no_inbound_data_for_2s() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: format!("ws://{}", addr),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: FastReconnect {
             delay: Duration::from_millis(10),

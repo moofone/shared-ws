@@ -107,7 +107,10 @@ Stale detection uses:
 
 ### TLS Policy
 
-`WsTlsConfig { validate_certs: bool }` is safe-by-default (`true`).
+TLS behavior is controlled at the transport boundary. `shared-ws` does not expose a
+`disable TLS validation` boolean; instead, provide a transport configured with a connector
+(for example `TungsteniteTransport::rustls(...)`) when you need custom trust roots or TLS
+policies.
 
 ## Transport Boundary
 

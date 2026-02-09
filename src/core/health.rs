@@ -6,6 +6,12 @@ use super::types::WsConnectionStats;
 
 const MAX_RECENT_ERRORS: usize = 100;
 const MAX_ERROR_TEXT_BYTES: usize = 1024;
+const MIN_RTT_US: u64 = 1;
+const MAX_RTT_US: u64 = 60_000_000;
+
+fn new_latency_histogram() -> Histogram<u64> {
+    Histogram::new_with_bounds(MIN_RTT_US, MAX_RTT_US, 3).expect("histogram bounds are valid")
+}
 
 #[derive(Debug, Clone)]
 struct ServerErrorRec {
@@ -48,6 +54,7 @@ pub struct WsHealthMonitor {
     server_errors: CircularBuffer<ServerErrorRec>,
     internal_errors: CircularBuffer<InternalErrorRec>,
     latency_histogram: Histogram<u64>,
+    rtt_clamped_samples: u64,
 }
 
 impl WsHealthMonitor {
@@ -65,16 +72,22 @@ impl WsHealthMonitor {
             reconnect_count: 0,
             server_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
             internal_errors: CircularBuffer::new(MAX_RECENT_ERRORS),
-            latency_histogram: Histogram::new_with_bounds(1, 1_000_000, 3)
-                .expect("histogram bounds are valid"),
+            latency_histogram: new_latency_histogram(),
+            rtt_clamped_samples: 0,
         }
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset_connection(&mut self) {
         let now = Instant::now();
         self.connection_started = now;
         self.last_message_received = now;
         self.last_message_sent = now;
+        self.message_count = 0;
+        self.error_count = 0;
+        self.server_errors.clear();
+        self.internal_errors.clear();
+        self.latency_histogram = new_latency_histogram();
+        self.rtt_clamped_samples = 0;
     }
 
     pub fn record_connect_attempt(&mut self) {
@@ -125,7 +138,20 @@ impl WsHealthMonitor {
     }
 
     pub fn record_rtt(&mut self, latency: Duration) {
-        let micros = latency.as_micros().min(u64::MAX as u128) as u64;
+        let mut micros = latency.as_micros().min(u64::MAX as u128) as u64;
+        let mut clamped = false;
+        if micros < MIN_RTT_US {
+            micros = MIN_RTT_US;
+            clamped = true;
+        }
+        if micros > MAX_RTT_US {
+            micros = MAX_RTT_US;
+            clamped = true;
+        }
+        if clamped {
+            self.rtt_clamped_samples = self.rtt_clamped_samples.saturating_add(1);
+        }
+        // Always record: `micros` is clamped to histogram bounds above.
         let _ = self.latency_histogram.record(micros);
     }
 
@@ -148,8 +174,12 @@ impl WsHealthMonitor {
             (0, 0)
         } else {
             (
-                self.latency_histogram.value_at_percentile(50.0),
-                self.latency_histogram.value_at_percentile(99.0),
+                self.latency_histogram
+                    .value_at_percentile(50.0)
+                    .min(MAX_RTT_US),
+                self.latency_histogram
+                    .value_at_percentile(99.0)
+                    .min(MAX_RTT_US),
             )
         };
 
@@ -166,6 +196,7 @@ impl WsHealthMonitor {
             p50_latency_us: p50,
             p99_latency_us: p99,
             latency_samples,
+            rtt_clamped_samples: self.rtt_clamped_samples,
         }
     }
 }
@@ -185,6 +216,43 @@ mod tests {
         assert_eq!(stats.latency_samples, 3);
         assert_eq!(stats.p50_latency_us, 200);
         assert_eq!(stats.p99_latency_us, 300);
+        assert_eq!(stats.rtt_clamped_samples, 0);
+    }
+
+    #[test]
+    fn health_monitor_clamps_rtt_to_histogram_bounds() {
+        let mut monitor = WsHealthMonitor::new(Duration::from_secs(5));
+        monitor.record_rtt(Duration::ZERO);
+        monitor.record_rtt(Duration::from_secs(365 * 24 * 60 * 60));
+
+        let stats = monitor.get_stats();
+        assert_eq!(stats.latency_samples, 2);
+        assert_eq!(stats.rtt_clamped_samples, 2);
+        assert!(stats.p50_latency_us >= MIN_RTT_US);
+        assert!(stats.p99_latency_us <= MAX_RTT_US);
+    }
+
+    #[test]
+    fn reset_connection_clears_per_connection_stats() {
+        let mut monitor = WsHealthMonitor::new(Duration::from_secs(5));
+        monitor.record_message();
+        monitor.record_server_error(Some(1), "server error");
+        monitor.record_rtt(Duration::from_micros(123));
+
+        assert!(monitor.get_stats().latency_samples > 0);
+        assert!(monitor.get_stats().messages > 0);
+        assert!(monitor.get_stats().errors > 0);
+        assert!(monitor.get_stats().recent_server_errors > 0);
+
+        monitor.reset_connection();
+
+        let stats = monitor.get_stats();
+        assert_eq!(stats.messages, 0);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.recent_server_errors, 0);
+        assert_eq!(stats.recent_internal_errors, 0);
+        assert_eq!(stats.latency_samples, 0);
+        assert_eq!(stats.rtt_clamped_samples, 0);
     }
 
     #[test]

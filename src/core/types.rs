@@ -127,7 +127,6 @@ pub enum WebSocketError {
 /// Transport-independent buffer sizing parameters used for websocket configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct WebSocketBufferConfig {
-    pub read_buffer_bytes: usize,
     pub write_buffer_bytes: usize,
     pub max_write_buffer_bytes: usize,
     pub max_message_bytes: usize,
@@ -137,29 +136,10 @@ pub struct WebSocketBufferConfig {
 impl Default for WebSocketBufferConfig {
     fn default() -> Self {
         Self {
-            // Read buffer sized to comfortably hold typical provider frames without growth.
-            read_buffer_bytes: 16 * 1024 * 1024,
             write_buffer_bytes: 128 << 10,
             max_write_buffer_bytes: 256 << 10,
             max_message_bytes: 16 * 1024 * 1024,
             max_frame_bytes: 16 * 1024 * 1024,
-        }
-    }
-}
-
-/// TLS configuration for websocket connections.
-///
-/// Safe-by-default: certificate validation is enabled unless explicitly disabled for development /
-/// controlled environments.
-#[derive(Clone, Copy, Debug)]
-pub struct WsTlsConfig {
-    pub validate_certs: bool,
-}
-
-impl Default for WsTlsConfig {
-    fn default() -> Self {
-        Self {
-            validate_certs: true,
         }
     }
 }
@@ -218,6 +198,7 @@ pub struct WsConnectionStats {
     pub p50_latency_us: u64,
     pub p99_latency_us: u64,
     pub latency_samples: u64,
+    pub rtt_clamped_samples: u64,
 }
 
 /// Canonical disconnect causes enumerated by the infrastructure.
@@ -469,48 +450,6 @@ pub trait WsReconnectStrategy: Send + Sync + 'static {
     fn next_delay(&mut self) -> Duration;
     fn reset(&mut self);
     fn should_retry(&self) -> bool;
-}
-
-/// Fixed reusable buffers owned by a websocket actor to avoid per-frame allocations.
-#[derive(Debug)]
-pub struct WsBufferPool {
-    inbound: bytes::BytesMut,
-    outbound: bytes::BytesMut,
-    inbound_capacity: usize,
-}
-
-impl WsBufferPool {
-    pub fn new(cfg: WebSocketBufferConfig) -> Self {
-        let inbound_capacity = cfg.read_buffer_bytes;
-        Self {
-            inbound: bytes::BytesMut::with_capacity(inbound_capacity),
-            outbound: bytes::BytesMut::with_capacity(cfg.write_buffer_bytes),
-            inbound_capacity,
-        }
-    }
-
-    /// Copy payload into the reusable inbound buffer, erroring if it exceeds the fixed capacity.
-    pub fn prepare_inbound<'a>(&'a mut self, payload: &[u8]) -> WebSocketResult<&'a [u8]> {
-        if payload.len() > self.inbound_capacity {
-            return Err(WebSocketError::ParseFailed(format!(
-                "inbound scratch buffer too small: payload {} > capacity {}",
-                payload.len(),
-                self.inbound_capacity
-            )));
-        }
-        self.inbound.clear();
-        self.inbound.extend_from_slice(payload);
-        Ok(self.inbound.as_ref())
-    }
-
-    /// Mutable outbound scratch buffer (reserved for future zero-copy writers).
-    pub fn outbound_mut(&mut self) -> &mut bytes::BytesMut {
-        &mut self.outbound
-    }
-
-    pub fn inbound_capacity(&self) -> usize {
-        self.inbound_capacity
-    }
 }
 
 /// Convenience alias.

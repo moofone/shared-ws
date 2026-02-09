@@ -1,7 +1,7 @@
 # Delegated Reply WS Requests (shared-ws PRD)
 
 Status: Draft
-Last updated: 2026-02-08
+Last updated: 2026-02-09
 
 ## Summary
 
@@ -19,7 +19,7 @@ Important: `shared-ws` is **rate limiter agnostic**. “Denied” is an outcome 
 
 ## Motivation
 
-`shared-ws` already provides a high-performance websocket actor (`src/ws/actor.rs`) and a send-side rate limiter (`src/core/rate_limit.rs`, `src/core/global_rate_limit.rs`), but the current public message surfaces are “fire and forget” at the application level:
+`shared-ws` already provides a high-performance websocket actor (`src/ws/actor.rs`), but the current public message surfaces are “fire and forget” at the application level:
 
 - `WsSubscriptionUpdate` returns once messages are enqueued/drained, not once an endpoint confirms success.
 - For endpoints like Deribit (JSON-RPC over WS), users often need "send subscribe + wait for confirmation" to safely build higher-level state machines.
@@ -62,9 +62,6 @@ Note: rate limiting is about **send** volume; it is not inherently tied to endpo
 - Websocket actor: `shared-ws/src/ws/actor.rs`
 - Writer actor: `shared-ws/src/ws/writer.rs`
 - Endpoint interface: `shared-ws/src/core/types.rs` (`WsEndpointHandler`, `WsSubscriptionManager`)
-- Existing internal rate limiting:
-  - `shared-ws/src/core/rate_limit.rs`
-  - `shared-ws/src/core/global_rate_limit.rs`
 
 ## Proposed Design
 
@@ -100,19 +97,15 @@ Where `WsDelegatedOk` minimally includes:
 
 We need a protocol-agnostic way for shared-ws to decide when an inbound frame confirms a pending request.
 
-Add a new optional trait used by endpoints:
+This is implemented as optional hooks on `WsEndpointHandler`:
 
-`trait WsPendingRequestMatcher` (exact name bikeshed):
+- `maybe_request_response(&[u8]) -> bool` (fast precheck; default `false`)
+- `match_request_response(&[u8]) -> Option<WsRequestMatch>`
+  - `WsRequestMatch { request_id, result, rate_limit_feedback }`
+  - `rate_limit_feedback` is informational only; `shared-ws` does not apply rate limiting policy.
 
-- `fn maybe_request_response(&self, data: &[u8]) -> bool`
-  - fast precheck; default `false` so high-volume feeds don’t pay extra parsing cost.
-- `fn match_request_response(&mut self, data: &[u8]) -> Option<WsRequestMatch>`
-  - returns a match with:
-    - `request_id: u64`
-    - `result: Result<(), String>` (success/failure message)
-    - optional `rate_limit_feedback` (retry-after, bucket hint) when the server signals throttling via payload
-
-Integrate this into `dispatch_endpoint` (`shared-ws/src/ws/actor.rs`) before or alongside `handler.parse_frame`.
+The actor integrates this into `dispatch_endpoint` (`shared-ws/src/ws/actor.rs`) before (and independent of)
+the normal parse flow so endpoints can correlate confirmations without changing their decode pipeline.
 
 Notes:
 
@@ -123,15 +116,14 @@ Notes:
 
 Inside `WebSocketActor`, maintain:
 
-- `pending_requests: HashMap<u64, PendingRequest>`
+- A bounded pending table keyed by `request_id`, tracking:
+  - `fingerprint`
+  - `deadline`
+  - whether the outbound send has been observed as successful (`sent_ok`)
+  - waiters split by confirm mode (`Sent` vs `Confirmed`)
 
-`PendingRequest` stores:
-
-- `fingerprint: u64`
-- `deadline: Instant`
-- waiters:
-  - `waiter0: Option<ReplySender<Result<WsDelegatedOk, WsDelegatedError>>>`
-  - `waiters: Vec<ReplySender<...>>` (allocate only if duplicates occur)
+Implementation detail: the current implementation uses a `PendingTable` plus a deadline min-heap so expiry
+is O(log N) per insert/deadline update and does not require periodic full-table scans.
 
 Behavior:
 
@@ -139,6 +131,11 @@ Behavior:
    - If `(request_id)` not present: create entry and send once.
    - If present with same fingerprint: attach waiter; **do not send again**.
    - If present with different fingerprint: reply immediately with `PayloadMismatch`.
+
+Connection gating:
+
+- If the actor is not ready for application writes (pre-handshake or during reconnect), delegated requests
+  fail fast as `NotDelivered`.
 
 ### 4) Timeouts / GC (Prevent Unbounded Growth)
 
