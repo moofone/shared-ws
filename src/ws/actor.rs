@@ -137,6 +137,7 @@ pub struct WebSocketActor<
     pending_outbound: VecDeque<OutboundItem>,
     delegated_pending: PendingTable<ReplySender<Result<WsDelegatedOk, WsDelegatedError>>>,
     delegated_expiry_scheduled_at: Option<Instant>,
+    delegated_expiry_task: Option<JoinHandle<()>>,
     inbound_bytes_total: u64,
     outbound_bytes_total: u64,
     last_inbound_payload_len: Option<usize>,
@@ -246,6 +247,7 @@ where
             pending_outbound,
             delegated_pending,
             delegated_expiry_scheduled_at: None,
+            delegated_expiry_task: None,
             inbound_bytes_total: 0,
             outbound_bytes_total: 0,
             last_inbound_payload_len: None,
@@ -364,25 +366,40 @@ where
                 self.schedule_delegated_expiry();
             }
             WebSocketEvent::SendMessage(message) => {
-                if let Err(err) = self.enqueue_message(message).await {
-                    let reason = format!("outbound send failed: {err}");
-                    let cause = WsDisconnectCause::InternalError {
-                        context: "outbound_send".to_string(),
-                        error: err.to_string(),
-                    };
-                    self.handle_disconnect(reason, cause).await?;
-                }
-            }
-            WebSocketEvent::SendBatch(messages) => {
-                for msg in messages {
-                    if let Err(err) = self.enqueue_message(msg).await {
+                match self.enqueue_message(message).await {
+                    Ok(()) => {}
+                    Err(WebSocketError::OutboundQueueFull) => {
+                        // Backpressure should surface to the caller; don't churn the connection.
+                        return Err(WebSocketError::OutboundQueueFull);
+                    }
+                    Err(err) => {
                         let reason = format!("outbound send failed: {err}");
                         let cause = WsDisconnectCause::InternalError {
                             context: "outbound_send".to_string(),
                             error: err.to_string(),
                         };
                         self.handle_disconnect(reason, cause).await?;
-                        break;
+                        return Err(err);
+                    }
+                }
+            }
+            WebSocketEvent::SendBatch(messages) => {
+                for msg in messages {
+                    match self.enqueue_message(msg).await {
+                        Ok(()) => {}
+                        Err(WebSocketError::OutboundQueueFull) => {
+                            // Backpressure should surface to the caller; don't churn the connection.
+                            return Err(WebSocketError::OutboundQueueFull);
+                        }
+                        Err(err) => {
+                            let reason = format!("outbound send failed: {err}");
+                            let cause = WsDisconnectCause::InternalError {
+                                context: "outbound_send".to_string(),
+                                error: err.to_string(),
+                            };
+                            self.handle_disconnect(reason, cause).await?;
+                            return Err(err);
+                        }
                     }
                 }
             }
@@ -586,6 +603,10 @@ where
         if let Some(handle) = self.reconnect_task.take() {
             handle.abort();
         }
+        if let Some(handle) = self.delegated_expiry_task.take() {
+            handle.abort();
+        }
+        self.delegated_expiry_scheduled_at = None;
         self.reconnect_scheduled_at = None;
 
         let _ = self.shutdown_tx.send(true);
@@ -641,12 +662,47 @@ where
     }
 
     async fn teardown_writer(&mut self) {
+        const STOP_GRACE_TIMEOUT: Duration = Duration::from_secs(1);
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+        let connection_label = self.connection_label().to_string();
         let writer = self.writer_ref.take();
 
-        if let (Some(writer), Some(supervisor)) = (&writer, self.writer_supervisor_ref.as_ref()) {
-            let _ = writer.stop_gracefully().await;
-            writer.wait_for_shutdown().await;
-            writer.unlink(supervisor).await;
+        if let (Some(writer), Some(supervisor)) = (writer, self.writer_supervisor_ref.as_ref()) {
+            match tokio::time::timeout(STOP_GRACE_TIMEOUT, writer.stop_gracefully()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => warn!(
+                    connection = %connection_label,
+                    error = %err,
+                    "writer stop_gracefully failed"
+                ),
+                Err(_) => {
+                    warn!(
+                        connection = %connection_label,
+                        "writer stop_gracefully timed out; killing"
+                    );
+                    writer.kill();
+                }
+            }
+
+            if tokio::time::timeout(SHUTDOWN_TIMEOUT, writer.wait_for_shutdown())
+                .await
+                .is_err()
+            {
+                warn!(
+                    connection = %connection_label,
+                    "writer shutdown timed out; killing"
+                );
+                writer.kill();
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, writer.wait_for_shutdown()).await;
+            }
+
+            if tokio::time::timeout(STOP_GRACE_TIMEOUT, writer.unlink(supervisor))
+                .await
+                .is_err()
+            {
+                warn!(connection = %connection_label, "writer unlink timed out");
+            }
         }
     }
 
@@ -1122,14 +1178,21 @@ where
                 let manager = self.handler.subscription_manager();
                 manager.serialize_subscription(&message)
             };
-            if let Err(err) = self.enqueue_message(into_ws_message(payload)).await {
-                let reason = format!("subscription update send failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "subscription_update".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                return Ok(());
+            match self.enqueue_message(into_ws_message(payload)).await {
+                Ok(()) => {}
+                Err(WebSocketError::OutboundQueueFull) => {
+                    // Backpressure should surface to the caller; don't churn the connection.
+                    return Err(WebSocketError::OutboundQueueFull);
+                }
+                Err(err) => {
+                    let reason = format!("subscription update send failed: {err}");
+                    let cause = WsDisconnectCause::InternalError {
+                        context: "subscription_update".to_string(),
+                        error: err.to_string(),
+                    };
+                    self.handle_disconnect(reason, cause).await?;
+                    return Err(err);
+                }
             }
         }
 
@@ -1206,6 +1269,9 @@ where
     fn schedule_delegated_expiry(&mut self) {
         let Some(next_deadline) = self.delegated_pending.next_deadline() else {
             self.delegated_expiry_scheduled_at = None;
+            if let Some(handle) = self.delegated_expiry_task.take() {
+                handle.abort();
+            }
             return;
         };
 
@@ -1221,12 +1287,17 @@ where
             return;
         }
 
+        if let Some(handle) = self.delegated_expiry_task.take() {
+            handle.abort();
+        }
         self.delegated_expiry_scheduled_at = Some(when);
         let actor_ref = self.actor_ref.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+        self.delegated_expiry_task = Some(tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let _ = actor_ref.tell(WebSocketEvent::DelegatedExpire).send().await;
-        });
+        }));
     }
 
     async fn send_with_writer(
