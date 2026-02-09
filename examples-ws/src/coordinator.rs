@@ -83,7 +83,14 @@ impl<'a> DelegatedSendCoordinator<'a> {
                     Outcome::SentNoConfirm
                 };
                 self.commit(permit, outcome).await;
-                DelegatedOutcome::Confirmed(ok)
+                if ok.confirmed {
+                    DelegatedOutcome::Confirmed(ok)
+                } else {
+                    DelegatedOutcome::Unconfirmed(WsDelegatedError::unconfirmed(
+                        ok.request_id,
+                        "sent but not confirmed",
+                    ))
+                }
             }
             Err(SendError::HandlerError(err)) => {
                 match &err {

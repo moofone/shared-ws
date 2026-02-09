@@ -457,7 +457,6 @@ where
         msg: ConnectionEstablished<T>,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.status = WsConnectionStatus::Connected;
         self.on_connection_established(msg.0, msg.1).await
     }
 }
@@ -802,6 +801,8 @@ where
         let writer = spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
         self.writer_ref = Some(writer);
         self.writer_ready.notify_waiters();
+        // Connected means "writer ready for outbound", not just "TCP/WebSocket handshake done".
+        self.status = WsConnectionStatus::Connected;
 
         self.handler.on_open();
 
