@@ -10,7 +10,7 @@ use shared_ws::ws::{
     WebSocketBufferConfig, WebSocketEvent, WsConfirmMode, WsDelegatedError, WsDelegatedOk,
     WsDelegatedRequest, WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsRequestMatch, WsSubscriptionAction,
-    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig, into_ws_message,
+    WsSubscriptionManager, WsSubscriptionStatus, into_ws_message,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -253,7 +253,6 @@ async fn delegated_confirmed_happy_path() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: format!("ws://{}", addr),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: NoReconnect,
         handler,
@@ -306,7 +305,6 @@ async fn delegated_endpoint_rejected_is_surfaced() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: format!("ws://{}", addr),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: NoReconnect,
         handler,

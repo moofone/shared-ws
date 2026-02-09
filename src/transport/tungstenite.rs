@@ -2,21 +2,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use futures_util::{Future, Sink, Stream, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async as tungstenite_connect,
+    Connector, MaybeTlsStream, WebSocketStream,
     connect_async_tls_with_config as tungstenite_connect_tls,
+    connect_async_with_config as tungstenite_connect_with_config,
     tungstenite::{
         Message as TungsteniteMessage, Utf8Bytes,
         protocol::{CloseFrame as TungCloseFrame, WebSocketConfig},
     },
 };
 
-use crate::core::{
-    WebSocketBufferConfig, WebSocketError, WsCloseFrame, WsFrame, WsText, WsTlsConfig,
-};
+use crate::core::{WebSocketBufferConfig, WebSocketError, WsCloseFrame, WsFrame, WsText};
 use crate::tls::install_rustls_crypto_provider;
 use crate::transport::WsTransport;
 
@@ -46,18 +44,20 @@ fn core_to_close(frame: WsCloseFrame) -> TungCloseFrame {
     }
 }
 
-fn msg_to_frame(msg: TungsteniteMessage) -> WsFrame {
+fn msg_to_frame(msg: TungsteniteMessage) -> Result<WsFrame, WebSocketError> {
     match msg {
         // Avoid a refcount bump / clone: we already own the message.
         TungsteniteMessage::Text(text) => {
             // SAFETY: tungstenite `Text` payloads are validated UTF-8.
-            WsFrame::Text(unsafe { WsText::from_bytes_unchecked(text.into()) })
+            Ok(WsFrame::Text(unsafe {
+                WsText::from_bytes_unchecked(text.into())
+            }))
         }
-        TungsteniteMessage::Binary(bytes) => WsFrame::Binary(bytes),
-        TungsteniteMessage::Ping(bytes) => WsFrame::Ping(bytes),
-        TungsteniteMessage::Pong(bytes) => WsFrame::Pong(bytes),
-        TungsteniteMessage::Close(frame) => WsFrame::Close(close_to_core(frame)),
-        TungsteniteMessage::Frame(_) => WsFrame::Binary(Bytes::new()),
+        TungsteniteMessage::Binary(bytes) => Ok(WsFrame::Binary(bytes)),
+        TungsteniteMessage::Ping(bytes) => Ok(WsFrame::Ping(bytes)),
+        TungsteniteMessage::Pong(bytes) => Ok(WsFrame::Pong(bytes)),
+        TungsteniteMessage::Close(frame) => Ok(WsFrame::Close(close_to_core(frame))),
+        TungsteniteMessage::Frame(_) => Err(map_ws_error("read", "unexpected raw frame")),
     }
 }
 
@@ -77,8 +77,8 @@ fn frame_to_msg(frame: WsFrame) -> TungsteniteMessage {
 
 fn build_ws_config(buffers: WebSocketBufferConfig) -> WebSocketConfig {
     let mut config = WebSocketConfig::default();
-    // Transport-level limits must reflect configured transport limits, not internal scratch
-    // buffer sizes (e.g. read_buffer_bytes). `read_buffer_bytes` is an actor optimization knob.
+    // Transport-level limits must reflect the configured transport limits; this is part of the
+    // public safety surface (DoS caps) and must not be accidentally skipped.
     config.max_message_size = Some(buffers.max_message_bytes);
     config.max_frame_size = Some(buffers.max_frame_bytes);
     config.write_buffer_size = buffers.write_buffer_bytes;
@@ -112,7 +112,7 @@ impl Stream for TungsteniteReader {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(msg_to_frame(msg)))),
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(msg_to_frame(msg))),
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(map_ws_error("read", err)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -163,7 +163,6 @@ impl WsTransport for TungsteniteTransport {
         &self,
         url: String,
         buffers: WebSocketBufferConfig,
-        tls: WsTlsConfig,
     ) -> Pin<Box<dyn Future<Output = Result<(Self::Reader, Self::Writer), WebSocketError>> + Send>>
     {
         let connector = self.connector.clone();
@@ -172,28 +171,15 @@ impl WsTransport for TungsteniteTransport {
 
             let config = build_ws_config(buffers);
 
-            let disable_tls_validation = !tls.validate_certs;
-
             let (stream, _) = match connector {
-                Some(connector) => tungstenite_connect_tls(
-                    url.clone(),
-                    Some(config),
-                    disable_tls_validation,
-                    Some(connector),
-                )
-                .await
-                .map_err(|e| map_ws_error("connect", e))?,
-                None => {
-                    // For ws://, use connect_async; for wss://, connect_async_tls_with_config works too.
-                    match tungstenite_connect(url.clone()).await {
-                        Ok(ok) => ok,
-                        Err(_) => {
-                            tungstenite_connect_tls(url, Some(config), disable_tls_validation, None)
-                                .await
-                                .map_err(|e| map_ws_error("connect", e))?
-                        }
-                    }
+                Some(connector) => {
+                    tungstenite_connect_tls(url.clone(), Some(config), false, Some(connector))
+                        .await
+                        .map_err(|e| map_ws_error("connect", e))?
                 }
+                None => tungstenite_connect_with_config(url, Some(config), false)
+                    .await
+                    .map_err(|e| map_ws_error("connect", e))?,
             };
 
             let (write, read) = stream.split();
@@ -215,9 +201,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tungstenite_limits_do_not_depend_on_read_buffer_bytes() {
+    fn tungstenite_limits_reflect_buffer_config() {
         let buffers = WebSocketBufferConfig {
-            read_buffer_bytes: 64 << 10,
             max_message_bytes: 2 << 20,
             max_frame_bytes: 3 << 20,
             write_buffer_bytes: 111,
@@ -229,14 +214,5 @@ mod tests {
         assert_eq!(cfg.max_frame_size, Some(3 << 20));
         assert_eq!(cfg.write_buffer_size, 111);
         assert_eq!(cfg.max_write_buffer_size, 222);
-
-        // Changing read buffer bytes should not alter transport limits.
-        let buffers2 = WebSocketBufferConfig {
-            read_buffer_bytes: 128 << 20,
-            ..buffers
-        };
-        let cfg2 = build_ws_config(buffers2);
-        assert_eq!(cfg2.max_message_size, Some(2 << 20));
-        assert_eq!(cfg2.max_frame_size, Some(3 << 20));
     }
 }

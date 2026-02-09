@@ -11,7 +11,6 @@ use shared_ws::ws::{
     WebSocketBufferConfig, WebSocketError, WebSocketEvent, WsDisconnectAction, WsDisconnectCause,
     WsEndpointHandler, WsErrorAction, WsFrame, WsMessageAction, WsParseOutcome,
     WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
-    WsTlsConfig,
 };
 use tokio::sync::mpsc;
 
@@ -117,7 +116,6 @@ impl WsTransport for StubTransport {
         &self,
         _url: String,
         _buffers: WebSocketBufferConfig,
-        _tls: WsTlsConfig,
     ) -> WsTransportConnectFuture<Self::Reader, Self::Writer> {
         let tx = self.sent_tx.clone();
         Box::pin(async move { Ok((stream::pending(), StubWriter { sent_tx: tx })) })
@@ -178,7 +176,6 @@ async fn outbound_drain_sends_promptly_without_internal_retry_scheduling() {
     let (sent_tx, mut sent_rx) = mpsc::unbounded_channel::<WsFrame>();
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: "ws://stub".to_string(),
-        tls: WsTlsConfig::default(),
         transport: StubTransport { sent_tx },
         reconnect_strategy: NoReconnect,
         handler: NoopHandler::new(),

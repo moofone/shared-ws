@@ -10,7 +10,7 @@ use shared_ws::ws::{
     ForwardAllIngress, GetConnectionStatus, ProtocolPingPong, WebSocketActor, WebSocketActorArgs,
     WebSocketBufferConfig, WebSocketError, WebSocketEvent, WsConnectionStatus, WsFrame,
     WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
-    WsTlsConfig, into_ws_message, message_bytes,
+    into_ws_message, message_bytes,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -77,7 +77,6 @@ impl WsTransport for TestTransport {
         &self,
         _url: String,
         _buffers: WebSocketBufferConfig,
-        _tls: WsTlsConfig,
     ) -> WsTransportConnectFuture<Self::Reader, Self::Writer> {
         let behavior = self.behavior;
         let sent_tx = self.sent_tx.clone();
@@ -170,7 +169,6 @@ fn spawn_actor(
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: "ws://test".to_string(),
-        tls: WsTlsConfig::default(),
         transport,
         reconnect_strategy: NoReconnect,
         handler: DeribitPublicHandler::new(NoSubscriptions),

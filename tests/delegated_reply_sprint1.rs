@@ -12,7 +12,7 @@ use shared_ws::ws::{
     WebSocketError, WebSocketEvent, WsConfirmMode, WsDelegatedError, WsDelegatedRequest,
     WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsFrame,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
-    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
+    WsSubscriptionManager, WsSubscriptionStatus,
 };
 use tokio::sync::mpsc;
 
@@ -125,7 +125,6 @@ impl WsTransport for StubTransport {
         &self,
         _url: String,
         _buffers: WebSocketBufferConfig,
-        _tls: WsTlsConfig,
     ) -> WsTransportConnectFuture<Self::Reader, Self::Writer> {
         let behavior = self.behavior;
         let tx = self.sent_tx.clone();
@@ -194,7 +193,6 @@ fn spawn_actor(behavior: WriterBehavior) -> (TestWsActorRef, mpsc::UnboundedRece
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: "ws://stub".to_string(),
-        tls: WsTlsConfig::default(),
         transport,
         reconnect_strategy: NoReconnect,
         handler: NoopHandler::new(),

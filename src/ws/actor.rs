@@ -9,11 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use sonic_rs::Value;
-use tokio::{
-    sync::{Notify, watch},
-    task::JoinHandle,
-    time::MissedTickBehavior,
-};
+use tokio::{sync::watch, task::JoinHandle, time::MissedTickBehavior};
 use tracing::{info, warn};
 
 use super::WsCircuitBreaker;
@@ -24,11 +20,11 @@ use super::health::WsHealthMonitor;
 use super::ping::{WsPingPongStrategy, WsPongResult};
 use super::types::{
     ForwardAllIngress, WebSocketBufferConfig, WebSocketError, WebSocketResult, WsActorRegistration,
-    WsBufferPool, WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
+    WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
     WsEndpointHandler, WsErrorAction, WsIngress, WsIngressAction, WsLatencyPercentile,
     WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsPayloadLatencySamplingConfig,
     WsReconnectStrategy, WsRequestMatch, WsSubscriptionAction, WsSubscriptionManager,
-    WsSubscriptionStatus, WsTlsConfig, into_ws_message, message_bytes,
+    WsSubscriptionStatus, into_ws_message, message_bytes,
 };
 use super::writer::{
     WriterWrite, WsWriterActor, spawn_writer_supervised_with, spawn_writer_supervisor,
@@ -51,6 +47,12 @@ struct LatencyBreach {
     samples: u64,
 }
 
+#[derive(Debug)]
+enum OutboundItem {
+    Frame(WsMessage),
+    Delegated { request_id: u64, frame: WsMessage },
+}
+
 /// Arguments passed when constructing a websocket actor instance.
 pub struct WebSocketActorArgs<
     E,
@@ -66,7 +68,6 @@ pub struct WebSocketActorArgs<
     T: WsTransport,
 {
     pub url: String,
-    pub tls: WsTlsConfig,
     pub transport: T,
     pub reconnect_strategy: R,
     pub handler: E,
@@ -101,7 +102,6 @@ pub struct WebSocketActor<
     T: WsTransport,
 {
     pub url: String,
-    pub tls: WsTlsConfig,
     pub transport: T,
     pub health: WsHealthMonitor,
     pub reconnect: R,
@@ -110,15 +110,15 @@ pub struct WebSocketActor<
     pub ingress: Option<I>,
     pub enable_ping: bool,
     pub actor_ref: ActorRef<Self>,
-    pub buffers: WsBufferPool,
     pub ws_buffers: WebSocketBufferConfig,
     pub reader_task: Option<JoinHandle<I>>,
     pub ping_task: Option<JoinHandle<()>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    ready_tx: watch::Sender<bool>,
+    ready_rx: watch::Receiver<bool>,
     pub writer_ref: Option<ActorRef<WsWriterActor<T::Writer>>>,
     writer_supervisor_ref: Option<ActorRef<TypedSupervisor<WsWriterActor<T::Writer>>>>,
-    writer_ready: Notify,
     pub outbound_capacity: usize,
     pub circuit_breaker: Option<WsCircuitBreaker>,
     pub latency_policy: Option<WsLatencyPolicy>,
@@ -129,7 +129,12 @@ pub struct WebSocketActor<
     pub registration: Option<WsActorRegistration>,
     pub reconnect_attempt: u64,
     pub metrics: Option<WsMetricsHook>,
-    pending_outbound: VecDeque<WsMessage>,
+    connect_gen: u64,
+    connect_in_flight: bool,
+    connect_task: Option<JoinHandle<()>>,
+    reconnect_task: Option<JoinHandle<()>>,
+    reconnect_scheduled_at: Option<Instant>,
+    pending_outbound: VecDeque<OutboundItem>,
     delegated_pending: PendingTable<ReplySender<Result<WsDelegatedOk, WsDelegatedError>>>,
     delegated_expiry_scheduled_at: Option<Instant>,
     inbound_bytes_total: u64,
@@ -157,7 +162,6 @@ where
     async fn on_start(args: Self::Args, ctx: ActorRef<Self>) -> WebSocketResult<Self> {
         let WebSocketActorArgs {
             url,
-            tls,
             transport,
             reconnect_strategy,
             handler,
@@ -175,8 +179,7 @@ where
         } = args;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let buffers = WsBufferPool::new(ws_buffers);
-
+        let (ready_tx, ready_rx) = watch::channel(false);
         if let Some(registration) = registration.as_ref() {
             let actor_name = &registration.name;
             // We only need local discovery for WS pools; distributed registration requires
@@ -208,7 +211,6 @@ where
 
         Ok(Self {
             url,
-            tls,
             transport,
             health,
             reconnect: reconnect_strategy,
@@ -217,25 +219,30 @@ where
             ingress: Some(ingress),
             enable_ping,
             actor_ref,
-            buffers,
             ws_buffers,
             reader_task: None,
             ping_task: None,
             shutdown_tx,
             shutdown_rx,
+            ready_tx,
+            ready_rx,
             writer_ref: None,
             writer_supervisor_ref: None,
-            writer_ready: Notify::new(),
             outbound_capacity,
             circuit_breaker,
             latency_policy,
             latency_breach_streak: 0,
-            status: WsConnectionStatus::Connecting,
+            status: WsConnectionStatus::Disconnected,
             payload_latency_sampling,
             next_payload_latency_sample_at: Instant::now(),
             registration,
             reconnect_attempt: 0,
             metrics,
+            connect_gen: 0,
+            connect_in_flight: false,
+            connect_task: None,
+            reconnect_task: None,
+            reconnect_scheduled_at: None,
             pending_outbound,
             delegated_pending,
             delegated_expiry_scheduled_at: None,
@@ -290,11 +297,17 @@ where
     ) -> Self::Reply {
         match event {
             WebSocketEvent::Connect => {
-                self.status = WsConnectionStatus::Connecting;
+                if let Some(handle) = self.reconnect_task.take() {
+                    handle.abort();
+                }
+                self.reconnect_scheduled_at = None;
+                if self.status == WsConnectionStatus::Connected || self.connect_in_flight {
+                    return Ok(());
+                }
+                let _ = self.ready_tx.send(false);
                 self.handle_connect().await?;
             }
             WebSocketEvent::Disconnect { reason, cause } => {
-                self.status = WsConnectionStatus::Disconnected;
                 self.handle_disconnect(reason, cause).await?;
             }
             WebSocketEvent::Inbound(message) => {
@@ -330,38 +343,6 @@ where
             }
             WebSocketEvent::CheckStale => {
                 self.check_stale().await?;
-            }
-            WebSocketEvent::DelegatedWriteDone {
-                request_id,
-                ok,
-                error,
-            } => {
-                if ok {
-                    let waiters = self
-                        .delegated_pending
-                        .mark_sent_ok(request_id)
-                        .unwrap_or_default();
-                    for waiter in waiters {
-                        waiter.send(Ok(WsDelegatedOk {
-                            request_id,
-                            confirmed: false,
-                            rate_limit_feedback: None,
-                        }));
-                    }
-                } else {
-                    let waiters = self
-                        .delegated_pending
-                        .complete_not_delivered(request_id)
-                        .unwrap_or_default();
-                    let msg = error.unwrap_or_else(|| "writer send failed".to_string());
-                    for waiter in waiters {
-                        waiter.send(Err(WsDelegatedError::not_delivered(
-                            request_id,
-                            msg.clone(),
-                        )));
-                    }
-                }
-                self.schedule_delegated_expiry();
             }
             WebSocketEvent::DelegatedExpire => {
                 self.delegated_expiry_scheduled_at = None;
@@ -416,16 +397,16 @@ where
                 }
             }
             WebSocketEvent::ResetState => self.handler.reset_state(),
-            WebSocketEvent::UpdateConnectionStatus(status) => self.status = status,
         }
         Ok(())
     }
 }
 
-pub(crate) struct ConnectionEstablished<TR: WsTransport>(
-    pub(crate) TR::Reader,
-    pub(crate) TR::Writer,
-);
+pub(crate) struct ConnectionEstablished<TR: WsTransport> {
+    pub(crate) generation: u64,
+    pub(crate) reader: TR::Reader,
+    pub(crate) writer: TR::Writer,
+}
 
 #[derive(Debug)]
 pub struct IngressEmit<M: Send + 'static> {
@@ -438,6 +419,7 @@ pub struct IngressEmitBatch<M: Send + 'static> {
 }
 
 pub(crate) struct ConnectionFailed {
+    pub(crate) generation: u64,
     pub(crate) error: String,
     pub(crate) status: Option<u16>,
 }
@@ -457,7 +439,17 @@ where
         msg: ConnectionEstablished<T>,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.on_connection_established(msg.0, msg.1).await
+        if msg.generation != self.connect_gen {
+            tracing::debug!(
+                expected = self.connect_gen,
+                got = msg.generation,
+                "ignoring stale ConnectionEstablished"
+            );
+            return Ok(());
+        }
+        self.connect_in_flight = false;
+        self.connect_task = None;
+        self.on_connection_established(msg.reader, msg.writer).await
     }
 }
 
@@ -476,6 +468,17 @@ where
         msg: ConnectionFailed,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if msg.generation != self.connect_gen {
+            tracing::debug!(
+                expected = self.connect_gen,
+                got = msg.generation,
+                "ignoring stale ConnectionFailed"
+            );
+            return Ok(());
+        }
+        self.connect_in_flight = false;
+        self.connect_task = None;
+        let _ = self.ready_tx.send(false);
         self.status = WsConnectionStatus::Disconnected;
         self.handle_connection_failed(msg.error, msg.status).await
     }
@@ -575,6 +578,16 @@ where
     T: WsTransport,
 {
     async fn stop_all_tasks(&mut self) {
+        self.connect_in_flight = false;
+        let _ = self.ready_tx.send(false);
+        if let Some(handle) = self.connect_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.reconnect_task.take() {
+            handle.abort();
+        }
+        self.reconnect_scheduled_at = None;
+
         let _ = self.shutdown_tx.send(true);
         if let Some(ingress) = Self::await_reader(&mut self.reader_task).await {
             self.ingress = Some(ingress);
@@ -619,7 +632,6 @@ where
         self.shutdown_rx = shutdown_rx;
         self.writer_ref = None;
         self.pending_outbound.clear();
-        self.writer_ready = Notify::new();
     }
 
     fn reset_shutdown_channel(&mut self) {
@@ -638,38 +650,71 @@ where
         }
     }
 
+    fn schedule_connect_after(&mut self, delay: Duration) {
+        let now = Instant::now();
+        let when = now + delay;
+        if let Some(existing) = self.reconnect_scheduled_at
+            && existing <= when
+        {
+            return;
+        }
+
+        if let Some(handle) = self.reconnect_task.take() {
+            handle.abort();
+        }
+        self.reconnect_scheduled_at = Some(when);
+        let actor_ref = self.actor_ref.clone();
+        self.reconnect_task = Some(tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let _ = actor_ref.tell(WebSocketEvent::Connect).send().await;
+        }));
+    }
+
     async fn handle_connect(&mut self) -> WebSocketResult<()> {
+        if self.connect_in_flight || self.status == WsConnectionStatus::Connected {
+            return Ok(());
+        }
         self.health.record_connect_attempt();
         if let Some(cb) = self.circuit_breaker.as_mut()
             && !cb.can_proceed()
         {
             if let Some(delay) = cb.time_until_retry() {
-                let actor_ref = self.actor_ref.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    let _ = actor_ref.tell(WebSocketEvent::Connect).send().await;
-                });
+                self.schedule_connect_after(delay);
             }
             return Ok(());
         }
 
+        self.status = WsConnectionStatus::Connecting;
+        self.connect_gen = self.connect_gen.saturating_add(1);
+        self.connect_in_flight = true;
+        if let Some(handle) = self.connect_task.take() {
+            handle.abort();
+        }
+
+        let generation = self.connect_gen;
         let self_ref = self.actor_ref.clone();
         let url = self.url.clone();
         let buffers = self.ws_buffers;
-        let tls = self.tls;
         let transport = self.transport.clone();
 
-        tokio::spawn(async move {
-            match transport.connect(url, buffers, tls).await {
+        self.connect_task = Some(tokio::spawn(async move {
+            match transport.connect(url, buffers).await {
                 Ok((reader, writer)) => {
                     let _ = self_ref
-                        .tell(ConnectionEstablished::<T>(reader, writer))
+                        .tell(ConnectionEstablished::<T> {
+                            generation,
+                            reader,
+                            writer,
+                        })
                         .send()
                         .await;
                 }
                 Err(err) => {
                     let _ = self_ref
                         .tell(ConnectionFailed {
+                            generation,
                             error: err.to_string(),
                             status: None,
                         })
@@ -677,7 +722,7 @@ where
                         .await;
                 }
             };
-        });
+        }));
 
         Ok(())
     }
@@ -757,14 +802,7 @@ where
             Some(delay),
             attempt,
         );
-
-        let actor_ref = self.actor_ref.clone();
-        tokio::spawn(async move {
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-            let _ = actor_ref.tell(WebSocketEvent::Connect).send().await;
-        });
+        self.schedule_connect_after(delay);
     }
 
     async fn on_connection_established(
@@ -773,11 +811,17 @@ where
         writer: T::Writer,
     ) -> WebSocketResult<()> {
         info!("websocket connection established");
+        let _ = self.ready_tx.send(false);
+        self.status = WsConnectionStatus::Connecting;
+        if let Some(handle) = self.reconnect_task.take() {
+            handle.abort();
+        }
+        self.reconnect_scheduled_at = None;
         self.health.record_connect_success();
         if let Some(cb) = self.circuit_breaker.as_mut() {
             cb.record_success();
         }
-        self.health.reset();
+        self.health.reset_connection();
         self.inbound_bytes_total = 0;
         self.outbound_bytes_total = 0;
         self.last_inbound_payload_len = None;
@@ -791,6 +835,14 @@ where
         let mut reader_shutdown = self.shutdown_rx.clone();
         let mut read = reader;
 
+        let Some(mut ingress) = self.ingress.take() else {
+            warn!(
+                connection = %self.connection_label(),
+                "connection established but ingress is missing; ignoring"
+            );
+            return Ok(());
+        };
+
         if self.writer_supervisor_ref.is_none() {
             self.writer_supervisor_ref = Some(spawn_writer_supervisor::<T::Writer>());
         }
@@ -799,19 +851,12 @@ where
             .as_ref()
             .expect("writer supervisor must be set");
         let writer = spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
-        self.writer_ref = Some(writer);
-        self.writer_ready.notify_waiters();
-        // Connected means "writer ready for outbound", not just "TCP/WebSocket handshake done".
-        self.status = WsConnectionStatus::Connected;
+        self.writer_ref = Some(writer.clone());
 
         self.handler.on_open();
 
         let reader_actor_ref = self.actor_ref.clone();
         let reader_connection_label = self.connection_label().to_string();
-        let mut ingress = self
-            .ingress
-            .take()
-            .expect("ingress must be present when establishing connection");
         ingress.on_open();
         self.reader_task = Some(tokio::spawn(async move {
             const TOUCH_FRAME_BATCH: u64 = 64;
@@ -965,6 +1010,20 @@ where
             ingress
         }));
 
+        if let Err(err) = self.send_initial_messages_with_writer(writer).await {
+            let reason = format!("initial send failed: {err}");
+            let cause = WsDisconnectCause::InternalError {
+                context: "initial_send".to_string(),
+                error: err.to_string(),
+            };
+            self.handle_disconnect(reason, cause).await?;
+            return Ok(());
+        }
+
+        let _ = self.ready_tx.send(true);
+        // Connected means "ready for application writes", not just "TCP/WebSocket handshake done".
+        self.status = WsConnectionStatus::Connected;
+
         if self.enable_ping {
             self.start_ping_loop();
         } else {
@@ -978,16 +1037,6 @@ where
             let reason = format!("outbound drain failed: {err}");
             let cause = WsDisconnectCause::InternalError {
                 context: "outbound_drain".to_string(),
-                error: err.to_string(),
-            };
-            self.handle_disconnect(reason, cause).await?;
-            return Ok(());
-        }
-
-        if let Err(err) = self.send_initial_messages().await {
-            let reason = format!("initial send failed: {err}");
-            let cause = WsDisconnectCause::InternalError {
-                context: "initial_send".to_string(),
                 error: err.to_string(),
             };
             self.handle_disconnect(reason, cause).await?;
@@ -1027,17 +1076,13 @@ where
         }));
     }
 
-    async fn send_initial_messages(&mut self) -> WebSocketResult<()> {
-        if let Some(auth) = self.handler.generate_auth()
-            && let Err(err) = self.enqueue_message(into_ws_message(auth)).await
-        {
-            let reason = format!("auth send failed: {err}");
-            let cause = WsDisconnectCause::InternalError {
-                context: "auth_send".to_string(),
-                error: err.to_string(),
-            };
-            self.handle_disconnect(reason, cause).await?;
-            return Ok(());
+    async fn send_initial_messages_with_writer(
+        &mut self,
+        writer: ActorRef<WsWriterActor<T::Writer>>,
+    ) -> WebSocketResult<()> {
+        if let Some(auth) = self.handler.generate_auth() {
+            self.send_with_writer(writer.clone(), into_ws_message(auth))
+                .await?;
         }
 
         let subscriptions = self.handler.subscription_manager().initial_subscriptions();
@@ -1046,15 +1091,8 @@ where
                 .handler
                 .subscription_manager()
                 .serialize_subscription(&sub);
-            if let Err(err) = self.enqueue_message(into_ws_message(bytes)).await {
-                let reason = format!("subscription send failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "subscription_send".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                break;
-            }
+            self.send_with_writer(writer.clone(), into_ws_message(bytes))
+                .await?;
         }
 
         Ok(())
@@ -1105,7 +1143,8 @@ where
             return Err(WebSocketError::OutboundQueueFull);
         }
 
-        self.pending_outbound.push_back(message);
+        self.pending_outbound
+            .push_back(OutboundItem::Frame(message));
         self.drain_pending_outbound().await
     }
 
@@ -1118,20 +1157,47 @@ where
             return Ok(());
         };
 
-        while !self.pending_outbound.is_empty() {
-            let queued = self
-                .pending_outbound
-                .pop_front()
-                .expect("front just existed");
-            if let Err(err) = self.send_with_writer(writer.clone(), queued).await {
-                self.pending_outbound.clear();
-                let reason = format!("outbound drain failed: {err}");
-                let cause = WsDisconnectCause::InternalError {
-                    context: "outbound_drain".to_string(),
-                    error: err.to_string(),
-                };
-                self.handle_disconnect(reason, cause).await?;
-                break;
+        while let Some(queued) = self.pending_outbound.pop_front() {
+            match queued {
+                OutboundItem::Frame(message) => {
+                    if let Err(err) = self.send_with_writer(writer.clone(), message).await {
+                        self.pending_outbound.clear();
+                        return Err(err);
+                    }
+                }
+                OutboundItem::Delegated { request_id, frame } => {
+                    let res = self.send_with_writer(writer.clone(), frame).await;
+                    match res {
+                        Ok(()) => {
+                            if let Some(waiters) = self.delegated_pending.mark_sent_ok(request_id) {
+                                for waiter in waiters {
+                                    waiter.send(Ok(WsDelegatedOk {
+                                        request_id,
+                                        confirmed: false,
+                                        rate_limit_feedback: None,
+                                    }));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let msg = err.to_string();
+                            if let Some(waiters) =
+                                self.delegated_pending.complete_not_delivered(request_id)
+                            {
+                                for waiter in waiters {
+                                    waiter.send(Err(WsDelegatedError::not_delivered(
+                                        request_id,
+                                        msg.clone(),
+                                    )));
+                                }
+                            }
+                            self.pending_outbound.clear();
+                            self.schedule_delegated_expiry();
+                            return Err(err);
+                        }
+                    }
+                    self.schedule_delegated_expiry();
+                }
             }
         }
         Ok(())
@@ -1199,6 +1265,19 @@ where
         reason: String,
         cause: WsDisconnectCause,
     ) -> WebSocketResult<()> {
+        self.status = WsConnectionStatus::Disconnected;
+        let _ = self.ready_tx.send(false);
+        self.connect_in_flight = false;
+        if let Some(handle) = self.connect_task.take() {
+            // Ensure any in-flight handshake result is treated as stale.
+            self.connect_gen = self.connect_gen.saturating_add(1);
+            handle.abort();
+        }
+        if let Some(handle) = self.reconnect_task.take() {
+            handle.abort();
+        }
+        self.reconnect_scheduled_at = None;
+
         let action = self.handler.classify_disconnect(&cause);
 
         self.log_reconnect_plan(
@@ -1343,8 +1422,8 @@ where
             WsPongResult::NotPong => {
                 if let Some(bytes) = message_bytes(&message) {
                     // This is a transport-independent guardrail. Do not tie it to the actor's
-                    // scratch buffer size: in the zero-copy path we parse directly on transport
-                    // bytes, and transports may allow `max_message_bytes > read_buffer_bytes`.
+                    // scratch buffers: in the zero-copy path we parse directly on transport bytes,
+                    // so the transport's configured max message size is the correct cap.
                     if bytes.len() > self.ws_buffers.max_message_bytes {
                         return Err(WebSocketError::ParseFailed(format!(
                             "frame too large: {} > max message {}",
@@ -1773,6 +1852,7 @@ mod latency_tests {
             p50_latency_us: p50,
             p99_latency_us: p99,
             latency_samples: samples,
+            rtt_clamped_samples: 0,
         }
     }
 
@@ -1889,22 +1969,28 @@ pub enum WebSocketEvent {
     },
     SendPing,
     CheckStale,
-    /// Completion event for delegated requests after observing a writer send result.
-    DelegatedWriteDone {
-        request_id: u64,
-        ok: bool,
-        error: Option<String>,
-    },
     /// Timer tick to expire delegated pending requests by deadline.
     DelegatedExpire,
     ResetState,
-    UpdateConnectionStatus(WsConnectionStatus),
 }
 
-/// Message to allow external callers to wait until the writer is ready.
+/// Message to allow external callers to wait until the actor is ready for application writes.
+///
+/// This uses a delegated reply internally to avoid blocking the actor mailbox. When using
+/// `ask(WaitForWriter { .. })`, errors (including timeouts) surface as
+/// `SendError::HandlerError(WebSocketError::...)`.
 #[derive(Clone, Copy, Debug)]
 pub struct WaitForWriter {
     pub timeout: Duration,
+}
+
+impl From<kameo::error::SendError<WaitForWriter, WebSocketError>> for WebSocketError {
+    fn from(err: kameo::error::SendError<WaitForWriter, WebSocketError>) -> Self {
+        match err {
+            kameo::error::SendError::HandlerError(err) => err,
+            other => WebSocketError::ActorError(other.to_string()),
+        }
+    }
 }
 
 /// Public ask-able request API: send an outbound frame and await a terminal outcome.
@@ -1927,10 +2013,10 @@ where
         req: WsDelegatedRequest,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let Some(writer) = self.writer_ref.as_ref().cloned() else {
+        if !*self.ready_rx.borrow() {
             return ctx.reply(Err(WsDelegatedError::not_delivered(
                 req.request_id,
-                "writer not ready",
+                "connection not ready",
             )));
         };
 
@@ -1946,34 +2032,36 @@ where
         match outcome {
             PendingInsertOutcome::Inserted => {
                 self.schedule_delegated_expiry();
-                let actor_ref = self.actor_ref.clone();
                 let request_id = req.request_id;
-                let message = req.frame;
-                tokio::spawn(async move {
-                    let result = writer.ask(WriterWrite { message }).await;
-                    match result {
-                        Ok(()) => {
-                            let _ = actor_ref
-                                .tell(WebSocketEvent::DelegatedWriteDone {
-                                    request_id,
-                                    ok: true,
-                                    error: None,
-                                })
-                                .send()
-                                .await;
-                        }
-                        Err(err) => {
-                            let _ = actor_ref
-                                .tell(WebSocketEvent::DelegatedWriteDone {
-                                    request_id,
-                                    ok: false,
-                                    error: Some(err.to_string()),
-                                })
-                                .send()
-                                .await;
+                if self.pending_outbound.len() >= self.outbound_capacity {
+                    self.health
+                        .record_internal_error("outbound", "pending queue full");
+                    if let Some(waiters) = self.delegated_pending.complete_not_delivered(request_id)
+                    {
+                        for waiter in waiters {
+                            waiter.send(Err(WsDelegatedError::not_delivered(
+                                request_id,
+                                "outbound queue full".to_string(),
+                            )));
                         }
                     }
+                    self.schedule_delegated_expiry();
+                    return delegated_reply;
+                }
+
+                self.pending_outbound.push_back(OutboundItem::Delegated {
+                    request_id,
+                    frame: req.frame,
                 });
+
+                if let Err(err) = self.drain_pending_outbound().await {
+                    let reason = format!("outbound drain failed: {err}");
+                    let cause = WsDisconnectCause::InternalError {
+                        context: "outbound_drain".to_string(),
+                        error: err.to_string(),
+                    };
+                    let _ = self.handle_disconnect(reason, cause).await;
+                }
             }
             PendingInsertOutcome::Joined => {
                 // Joining may have tightened the deadline; ensure expiry is scheduled.
@@ -2051,50 +2139,53 @@ where
     I: WsIngress<Message = E::Message>,
     T: WsTransport,
 {
-    type Reply = WebSocketResult<()>;
+    type Reply = DelegatedReply<WebSocketResult<()>>;
 
     async fn handle(
         &mut self,
         msg: WaitForWriter,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.writer_ref.is_some() {
-            return Ok(());
+        if *self.ready_rx.borrow() {
+            return ctx.reply(Ok(()));
         }
 
+        let (delegated_reply, reply_sender) = ctx.reply_sender();
+        let Some(reply_sender) = reply_sender else {
+            return delegated_reply;
+        };
+        let mut ready_rx = self.ready_rx.clone();
         let deadline = Instant::now() + msg.timeout;
-        loop {
-            if self.writer_ref.is_some() {
-                return Ok(());
-            }
+        let timeout = msg.timeout;
+        let label = self.connection_label().to_string();
+        tokio::spawn(async move {
+            loop {
+                if *ready_rx.borrow() {
+                    reply_sender.send(Ok(()));
+                    return;
+                }
 
-            // Subscribe first, then re-check to avoid missing a notify between check and await.
-            let notified = self.writer_ready.notified();
-            if self.writer_ref.is_some() {
-                return Ok(());
-            }
+                let now = Instant::now();
+                if now >= deadline {
+                    reply_sender.send(Err(WebSocketError::Timeout {
+                        context: format!("writer not ready for {label} within {timeout:?}"),
+                    }));
+                    return;
+                }
 
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(WebSocketError::Timeout {
-                    context: format!(
-                        "writer not ready for {} within {:?}",
-                        self.connection_label(),
-                        msg.timeout
-                    ),
-                });
+                let remaining = deadline.duration_since(now);
+                match tokio::time::timeout(remaining, ready_rx.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) | Err(_) => {
+                        reply_sender.send(Err(WebSocketError::Timeout {
+                            context: format!("writer not ready for {label} within {timeout:?}"),
+                        }));
+                        return;
+                    }
+                }
             }
+        });
 
-            let remaining = deadline.duration_since(now);
-            if tokio::time::timeout(remaining, notified).await.is_err() {
-                return Err(WebSocketError::Timeout {
-                    context: format!(
-                        "writer not ready for {} within {:?}",
-                        self.connection_label(),
-                        msg.timeout
-                    ),
-                });
-            }
-        }
+        delegated_reply
     }
 }

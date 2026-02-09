@@ -2,7 +2,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -43,18 +42,20 @@ fn core_to_close(frame: WsCloseFrame) -> TungCloseFrame {
     }
 }
 
-fn msg_to_frame(msg: TungsteniteMessage) -> WsFrame {
+fn msg_to_frame(msg: TungsteniteMessage) -> Result<WsFrame, WebSocketError> {
     match msg {
         // Avoid a refcount bump / clone: we already own the message.
         TungsteniteMessage::Text(text) => {
             // SAFETY: tungstenite `Text` payloads are validated UTF-8.
-            WsFrame::Text(unsafe { WsText::from_bytes_unchecked(text.into()) })
+            Ok(WsFrame::Text(unsafe {
+                WsText::from_bytes_unchecked(text.into())
+            }))
         }
-        TungsteniteMessage::Binary(bytes) => WsFrame::Binary(bytes),
-        TungsteniteMessage::Ping(bytes) => WsFrame::Ping(bytes),
-        TungsteniteMessage::Pong(bytes) => WsFrame::Pong(bytes),
-        TungsteniteMessage::Close(frame) => WsFrame::Close(close_to_core(frame)),
-        TungsteniteMessage::Frame(_) => WsFrame::Binary(Bytes::new()),
+        TungsteniteMessage::Binary(bytes) => Ok(WsFrame::Binary(bytes)),
+        TungsteniteMessage::Ping(bytes) => Ok(WsFrame::Ping(bytes)),
+        TungsteniteMessage::Pong(bytes) => Ok(WsFrame::Pong(bytes)),
+        TungsteniteMessage::Close(frame) => Ok(WsFrame::Close(close_to_core(frame))),
+        TungsteniteMessage::Frame(_) => Err(map_ws_error("read", "unexpected raw frame")),
     }
 }
 
@@ -130,10 +131,10 @@ impl WsClient {
     }
 
     pub async fn next(&mut self) -> Option<Result<WsFrame, WebSocketError>> {
-        self.inner
-            .next()
-            .await
-            .map(|res| res.map(msg_to_frame).map_err(|e| map_ws_error("read", e)))
+        self.inner.next().await.map(|res| {
+            res.map_err(|e| map_ws_error("read", e))
+                .and_then(msg_to_frame)
+        })
     }
 }
 
@@ -143,7 +144,7 @@ impl Stream for WsClient {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
         match inner.poll_next(cx) {
-            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(Ok(msg_to_frame(msg)))),
+            Poll::Ready(Some(Ok(msg))) => Poll::Ready(Some(msg_to_frame(msg))),
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(map_ws_error("read", err)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -195,20 +196,21 @@ pub async fn connect_request(request: http::Request<()>) -> Result<WsClient, Web
     Ok(WsClient { inner: stream })
 }
 
-/// Connect using TLS configuration and optional connector.
+/// Connect using optional configuration and connector.
+///
+/// Note: `disable_nagle` controls TCP_NODELAY (it does **not** disable TLS certificate validation).
 pub async fn connect_async_tls_with_config(
     url: impl AsRef<str>,
     config: Option<WsConnectConfig>,
-    disable_tls_validation: bool,
+    disable_nagle: bool,
     connector: Option<WsConnector>,
 ) -> Result<WsClient, WebSocketError> {
     install_rustls_crypto_provider();
     let config = config.map(WebSocketConfig::from);
     let connector = connector.map(|c| c.inner);
-    let (stream, _) =
-        tungstenite_connect_tls(url.as_ref(), config, disable_tls_validation, connector)
-            .await
-            .map_err(|err| WebSocketError::ConnectionFailed(err.to_string()))?;
+    let (stream, _) = tungstenite_connect_tls(url.as_ref(), config, disable_nagle, connector)
+        .await
+        .map_err(|err| WebSocketError::ConnectionFailed(err.to_string()))?;
     Ok(WsClient { inner: stream })
 }
 

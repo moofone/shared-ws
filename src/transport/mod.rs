@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use futures_util::{Sink, Stream};
 
-use crate::core::{WebSocketBufferConfig, WebSocketError, WsFrame, WsTlsConfig};
+use crate::core::{WebSocketBufferConfig, WebSocketError, WsFrame};
 
 pub mod tungstenite;
 
@@ -24,6 +24,5 @@ pub trait WsTransport: Clone + Send + Sync + 'static {
         &self,
         url: String,
         buffers: WebSocketBufferConfig,
-        tls: WsTlsConfig,
     ) -> WsTransportConnectFuture<Self::Reader, Self::Writer>;
 }

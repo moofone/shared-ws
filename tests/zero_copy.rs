@@ -5,7 +5,7 @@ use shared_ws::ws::{
     ProtocolPingPong, WebSocketActor, WebSocketActorArgs, WebSocketBufferConfig, WebSocketEvent,
     WsDisconnectAction, WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsMessage,
     WsMessageAction, WsParseOutcome, WsReconnectStrategy, WsSubscriptionAction,
-    WsSubscriptionManager, WsSubscriptionStatus, WsTlsConfig,
+    WsSubscriptionManager, WsSubscriptionStatus,
 };
 use std::io;
 use std::time::Duration;
@@ -134,7 +134,6 @@ async fn inbound_processing_is_zero_copy() {
 
     let actor = WebSocketActor::spawn(WebSocketActorArgs {
         url: "wss://example.invalid".to_string(),
-        tls: WsTlsConfig::default(),
         transport: TungsteniteTransport::default(),
         reconnect_strategy: reconnect,
         handler,
