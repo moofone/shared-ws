@@ -23,3 +23,5 @@ transport and protocol logic cleanly separated.
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
+- Delegated reply PRD: [`spec/DELEGATED_REPLY_WS.md`](spec/DELEGATED_REPLY_WS.md)
+- End-to-end examples: [`examples-ws/README.md`](examples-ws/README.md)
