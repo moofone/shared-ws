@@ -213,7 +213,7 @@ where
 async fn delegated_subscribe_happy_path_confirmed() {
     let cfg = shared_rate_limiter::Config::fixed_window(10, Duration::from_millis(200)).unwrap();
     let limiter = RateLimiter::new(cfg);
-    let coordinator = DeribitCoordinator::new(limiter, 0);
+    let mut coordinator = DeribitCoordinator::new(limiter, 0);
 
     let (actor, mut sent_rx, inbound_tx) = spawn_actor(WriterBehavior::Ok);
     actor.tell(WebSocketEvent::Connect).send().await.unwrap();
@@ -252,7 +252,7 @@ async fn delegated_subscribe_happy_path_confirmed() {
 async fn delegated_subscribe_denied_by_rate_limiter() {
     let cfg = shared_rate_limiter::Config::fixed_window(0, Duration::from_millis(200)).unwrap();
     let limiter = RateLimiter::new(cfg);
-    let coordinator = DeribitCoordinator::new(limiter, 0);
+    let mut coordinator = DeribitCoordinator::new(limiter, 0);
 
     let (actor, mut sent_rx, _inbound_tx) = spawn_actor(WriterBehavior::Ok);
     actor.tell(WebSocketEvent::Connect).send().await.unwrap();
@@ -281,7 +281,7 @@ async fn delegated_subscribe_denied_by_rate_limiter() {
 async fn delegated_subscribe_unconfirmed_times_out() {
     let cfg = shared_rate_limiter::Config::fixed_window(10, Duration::from_millis(200)).unwrap();
     let limiter = RateLimiter::new(cfg);
-    let coordinator = DeribitCoordinator::new(limiter, 0);
+    let mut coordinator = DeribitCoordinator::new(limiter, 0);
 
     let (actor, _sent_rx, _inbound_tx) = spawn_actor(WriterBehavior::Ok);
     actor.tell(WebSocketEvent::Connect).send().await.unwrap();
@@ -304,7 +304,7 @@ async fn delegated_subscribe_unconfirmed_times_out() {
 async fn delegated_subscribe_not_delivered_refunds() {
     let cfg = shared_rate_limiter::Config::fixed_window(1, Duration::from_millis(200)).unwrap();
     let limiter = RateLimiter::new(cfg);
-    let coordinator = DeribitCoordinator::new(limiter, 0);
+    let mut coordinator = DeribitCoordinator::new(limiter, 0);
 
     let (actor1, _sent_rx1, _inbound_tx1) = spawn_actor(WriterBehavior::Err("boom"));
     actor1.tell(WebSocketEvent::Connect).send().await.unwrap();

@@ -6,7 +6,6 @@ use std::sync::{
 use std::time::Duration;
 
 use bytes::Bytes;
-use kameo::Actor;
 use shared_ws::client::accept_async;
 use shared_ws::transport::tungstenite::TungsteniteTransport;
 use shared_ws::ws::{

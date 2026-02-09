@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use futures_util::Sink;
 use futures_util::stream;
-use kameo::Actor;
 use kameo::error::SendError;
 use shared_ws::transport::{WsTransport, WsTransportConnectFuture};
 use shared_ws::ws::{

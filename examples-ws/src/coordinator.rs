@@ -4,7 +4,6 @@ use kameo::error::SendError;
 use kameo::prelude::ActorRef;
 use shared_rate_limiter::{Cost, Deny, Key, Outcome, Permit, RateLimiter};
 use shared_ws::ws::{WebSocketActor, WsDelegatedError, WsDelegatedOk, WsDelegatedRequest};
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegatedOutcome<Ok, Err> {
@@ -16,17 +15,17 @@ pub enum DelegatedOutcome<Ok, Err> {
 }
 
 pub struct DelegatedSendCoordinator<'a> {
-    limiter: &'a Mutex<RateLimiter>,
+    limiter: &'a mut RateLimiter,
     key: Key,
     started_at: Instant,
 }
 
 impl<'a> DelegatedSendCoordinator<'a> {
-    pub fn new(limiter: &'a Mutex<RateLimiter>, key: Key) -> Self {
+    pub fn new(limiter: &'a mut RateLimiter, key: Key, started_at: Instant) -> Self {
         Self {
             limiter,
             key,
-            started_at: Instant::now(),
+            started_at,
         }
     }
 
@@ -34,26 +33,23 @@ impl<'a> DelegatedSendCoordinator<'a> {
         self.started_at.elapsed()
     }
 
-    async fn try_acquire(&self, cost: Cost) -> Result<Permit, Deny> {
+    fn try_acquire(&mut self, cost: Cost) -> Result<Permit, Deny> {
         let now = self.now();
-        let mut limiter = self.limiter.lock().await;
-        limiter.try_acquire(self.key, cost, now)
+        self.limiter.try_acquire(self.key, cost, now)
     }
 
-    async fn commit(&self, permit: Permit, outcome: Outcome) {
+    fn commit(&mut self, permit: Permit, outcome: Outcome) {
         let now = self.now();
-        let mut limiter = self.limiter.lock().await;
-        limiter.commit(permit, outcome, now);
+        self.limiter.commit(permit, outcome, now);
     }
 
-    async fn refund(&self, permit: Permit) {
+    fn refund(&mut self, permit: Permit) {
         let now = self.now();
-        let mut limiter = self.limiter.lock().await;
-        limiter.refund(permit, now);
+        self.limiter.refund(permit, now);
     }
 
     pub async fn send_and_account<E, R, P, I, T>(
-        &self,
+        &mut self,
         ws: &ActorRef<WebSocketActor<E, R, P, I, T>>,
         req: WsDelegatedRequest,
         cost: Cost,
@@ -65,7 +61,7 @@ impl<'a> DelegatedSendCoordinator<'a> {
         I: shared_ws::ws::WsIngress<Message = E::Message>,
         T: shared_ws::transport::WsTransport,
     {
-        let permit = match self.try_acquire(cost).await {
+        let permit = match self.try_acquire(cost) {
             Ok(p) => p,
             Err(deny) => {
                 return DelegatedOutcome::Denied {
@@ -82,7 +78,7 @@ impl<'a> DelegatedSendCoordinator<'a> {
                 } else {
                     Outcome::SentNoConfirm
                 };
-                self.commit(permit, outcome).await;
+                self.commit(permit, outcome);
                 if ok.confirmed {
                     DelegatedOutcome::Confirmed(ok)
                 } else {
@@ -95,40 +91,38 @@ impl<'a> DelegatedSendCoordinator<'a> {
             Err(SendError::HandlerError(err)) => {
                 match &err {
                     WsDelegatedError::NotDelivered { .. } => {
-                        self.refund(permit).await;
+                        self.refund(permit);
                         DelegatedOutcome::NotDelivered(err)
                     }
                     WsDelegatedError::Unconfirmed { .. } => {
-                        self.commit(permit, Outcome::SentNoConfirm).await;
+                        self.commit(permit, Outcome::SentNoConfirm);
                         DelegatedOutcome::Unconfirmed(err)
                     }
                     WsDelegatedError::EndpointRejected { .. } => {
                         // Response observed; treat as confirmed for accounting.
-                        self.commit(permit, Outcome::Confirmed).await;
+                        self.commit(permit, Outcome::Confirmed);
                         DelegatedOutcome::Other(err)
                     }
                     WsDelegatedError::PayloadMismatch { .. }
                     | WsDelegatedError::TooManyPending { .. } => {
                         // Local pre-send error.
-                        self.refund(permit).await;
+                        self.refund(permit);
                         DelegatedOutcome::Other(err)
                     }
                 }
             }
             Err(SendError::ActorNotRunning(_))
             | Err(SendError::MailboxFull(_))
-            | Err(SendError::MissingConnection)
-            | Err(SendError::ConnectionClosed)
             | Err(SendError::Timeout(_)) => {
                 // Actor wasn't able to accept/process the request, or no reply was received.
-                self.refund(permit).await;
+                self.refund(permit);
                 DelegatedOutcome::NotDelivered(WsDelegatedError::not_delivered(
                     0,
                     "actor send failed",
                 ))
             }
             Err(SendError::ActorStopped) => {
-                self.refund(permit).await;
+                self.refund(permit);
                 DelegatedOutcome::NotDelivered(WsDelegatedError::not_delivered(0, "actor stopped"))
             }
         }

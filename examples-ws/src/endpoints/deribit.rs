@@ -8,7 +8,6 @@ use shared_ws::ws::{
 };
 
 use crate::coordinator::{DelegatedOutcome, DelegatedSendCoordinator};
-use tokio::sync::Mutex;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -152,20 +151,22 @@ where
 }
 
 pub struct DeribitCoordinator {
-    limiter: Mutex<RateLimiter>,
+    limiter: RateLimiter,
     key: Key,
+    started_at: Instant,
 }
 
 impl DeribitCoordinator {
     pub fn new(limiter: RateLimiter, key: Key) -> Self {
         Self {
-            limiter: Mutex::new(limiter),
+            limiter,
             key,
+            started_at: Instant::now(),
         }
     }
 
     pub async fn delegated_subscribe<R, P, I, T, S>(
-        &self,
+        &mut self,
         ws: &kameo::prelude::ActorRef<
             shared_ws::ws::WebSocketActor<DeribitPublicHandler<S>, R, P, I, T>,
         >,
@@ -186,7 +187,8 @@ impl DeribitCoordinator {
         let fingerprint = sub.fingerprint();
 
         // External coordinator: acquire permit immediately before sending.
-        let coordinator = DelegatedSendCoordinator::new(&self.limiter, self.key);
+        let mut coordinator =
+            DelegatedSendCoordinator::new(&mut self.limiter, self.key, self.started_at);
         coordinator
             .send_and_account(
                 ws,

@@ -1,13 +1,14 @@
 [package]
 name = "examples-ws"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+publish = false
 
 [dependencies]
 anyhow = "1"
 bytes = "1.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-kameo = { git = "https://github.com/moofone/kameo", rev = "ee74f3e4e21efe4f456e6eeb1f7e68cb24322186", features = ["remote"] }
+kameo = { version = "0.19.2", default-features = false, features = ["tracing"] }
 # Use the local workspace crate to avoid pinning a separate git SHA in Cargo.lock.
 shared-ws = { path = ".." }
 shared-rate_limiter = { git = "https://github.com/moofone/shared-rate_limiter", rev = "ddb3dea2e06946697a28af5ed71f8bb29007cc1e" }

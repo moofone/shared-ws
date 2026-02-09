@@ -183,9 +183,8 @@ where
         let (ready_tx, ready_rx) = watch::channel(false);
         if let Some(registration) = registration.as_ref() {
             let actor_name = &registration.name;
-            // We only need local discovery for WS pools; distributed registration requires
-            // implementing `ActorRegistration`, which we intentionally avoid here.
-            match ctx.register_local(actor_name.clone()) {
+            // We only need local discovery for WS pools.
+            match ctx.register(actor_name.clone()) {
                 Ok(_) => {
                     tracing::debug!(
                         actor = %actor_name,
@@ -279,6 +278,20 @@ where
                 kameo::prelude::ActorStopReason::Panicked(err),
             ))
         }
+    }
+}
+
+impl<E, R, P, I, T> WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    /// Convenience wrapper so callers don't need to import `kameo::actor::Spawn`.
+    pub fn spawn(args: WebSocketActorArgs<E, R, P, I, T>) -> ActorRef<Self> {
+        <Self as kameo::actor::Spawn>::spawn(args)
     }
 }
 

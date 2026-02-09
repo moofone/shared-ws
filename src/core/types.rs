@@ -169,7 +169,7 @@ pub struct WsLatencyPolicy {
     pub consecutive_breaches: u32,
 }
 
-/// Registration options for distributed actor discovery.
+/// Registration options for actor discovery by name.
 #[derive(Clone, Debug)]
 pub struct WsActorRegistration {
     pub name: String,
