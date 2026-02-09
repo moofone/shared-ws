@@ -12,7 +12,7 @@ kameo = { git = "https://github.com/moofone/kameo", rev = "ee74f3e4e21efe4f456e6
 shared-ws = { path = ".." }
 shared-rate_limiter = { git = "https://github.com/moofone/shared-rate_limiter", rev = "ddb3dea2e06946697a28af5ed71f8bb29007cc1e" }
 sonic-rs = "0.5.6"
-tokio = { version = "1", features = ["sync", "time", "net", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["sync", "time", "net", "rt", "rt-multi-thread"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots", "connect"] }
 tracing = "0.1"
 
