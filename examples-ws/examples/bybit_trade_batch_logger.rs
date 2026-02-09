@@ -50,7 +50,7 @@ fn usage() -> &'static str {
   - multiple trades fall into the same configurable tick bucket (default 50ms)\n\
 \n\
 USAGE:\n\
-  cargo run --example bybit_trade_batch_logger -- [--url <wss-url>] [--symbols <CSV>] [--tick-ms <N>] [--dump]\n\
+  cargo run -p examples-ws --example bybit_trade_batch_logger -- [--url <wss-url>] [--symbols <CSV>] [--tick-ms <N>] [--dump]\n\
 \n\
 DEFAULTS:\n\
   --url      wss://stream.bybit.com/v5/public/linear\n\
