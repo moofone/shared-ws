@@ -3,3 +3,5 @@ Cargo.lock
 .DS_Store
 AGENTS.md
 qa/
+sprints/
+spec/
