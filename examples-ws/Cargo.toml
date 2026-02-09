@@ -7,10 +7,10 @@ edition = "2024"
 anyhow = "1"
 bytes = "1.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-kameo = { git = "https://github.com/moofone/kameo", features = ["remote"] }
+kameo = { git = "https://github.com/moofone/kameo", branch = "main", features = ["remote"] }
 # Use the local workspace crate to avoid pinning a separate git SHA in Cargo.lock.
 shared-ws = { path = ".." }
-shared-rate_limiter = { git = "https://github.com/moofone/shared-rate_limiter" }
+shared-rate_limiter = { git = "https://github.com/moofone/shared-rate_limiter", branch = "main" }
 sonic-rs = "0.5.6"
 tokio = { version = "1", features = ["sync", "time", "net", "rt", "rt-multi-thread"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots", "connect"] }
