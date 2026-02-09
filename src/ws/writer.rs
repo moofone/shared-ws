@@ -1,6 +1,7 @@
 use super::{WebSocketError, WebSocketResult, WsMessage};
 use crate::supervision::TypedSupervisor;
 use futures_util::{Sink, SinkExt};
+use kameo::actor::Spawn;
 use kameo::prelude::{Actor, ActorRef, Context, Message as KameoMessage};
 use tokio::sync::watch;
 use tracing::debug;
