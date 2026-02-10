@@ -112,7 +112,7 @@ where
     W: Sink<WsMessage, Error = WebSocketError> + Send + Sync + Unpin + 'static,
 {
     // For WS writers, restart requires a new connection; supervisor will not auto-restart.
-    TypedSupervisor::spawn(TypedSupervisor::new(
+    <TypedSupervisor<WsWriterActor<W>> as Actor>::spawn(TypedSupervisor::new(
         "shared-ws-writer",
         None,
         |_name| -> ActorRef<WsWriterActor<W>> {
@@ -130,7 +130,7 @@ pub async fn spawn_writer_supervised_with<W>(
 where
     W: Sink<WsMessage, Error = WebSocketError> + Send + Sync + Unpin + 'static,
 {
-    let actor = WsWriterActor::spawn(WsWriterActor::new(writer, shutdown_rx));
+    let actor = <WsWriterActor<W> as Actor>::spawn(WsWriterActor::new(writer, shutdown_rx));
     actor.link(supervisor).await;
     actor
 }
