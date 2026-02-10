@@ -112,6 +112,8 @@ impl<'a> DelegatedSendCoordinator<'a> {
                 }
             }
             Err(SendError::ActorNotRunning(_))
+            | Err(SendError::MissingConnection)
+            | Err(SendError::ConnectionClosed)
             | Err(SendError::MailboxFull(_))
             | Err(SendError::Timeout(_)) => {
                 // Actor wasn't able to accept/process the request, or no reply was received.
