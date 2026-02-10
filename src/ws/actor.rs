@@ -184,7 +184,7 @@ where
         if let Some(registration) = registration.as_ref() {
             let actor_name = &registration.name;
             // We only need local discovery for WS pools.
-            match ctx.register(actor_name.clone()) {
+            match ctx.register_local(actor_name.clone()) {
                 Ok(_) => {
                     tracing::debug!(
                         actor = %actor_name,
