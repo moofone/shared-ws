@@ -6,8 +6,7 @@ belong.
 
 For design/background, see `docs/architecture/architecture.md`.
 
-For more complete, runnable integrations, see the examples repo:
-[moofone/examples-ws](https://github.com/moofone/examples-ws).
+For more complete, runnable integrations, see `examples/e2e/`.
 
 ## Mental Model (What You Provide vs What shared-ws Provides)
 
@@ -183,9 +182,7 @@ If you need outbound throttling:
 - put an external coordinator in front of `ws.ask(WsDelegatedRequest { .. })`
 - acquire quota immediately before sending, then commit/refund based on the outcome
 
-See `examples-ws/src/coordinator.rs` for a full pattern using `shared-rate_limiter`.
-For a fuller end-to-end set of examples, see
-[moofone/examples-ws](https://github.com/moofone/examples-ws).
+See `examples/e2e/src/coordinator.rs` for a full pattern using `shared-rate_limiter`.
 
 ### “Rate limiter actor name”
 

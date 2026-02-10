@@ -1,6 +1,6 @@
 [package]
 name = "shared-ws"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.88"
 description = "High-performance WebSocket infrastructure built around an actor-managed connection lifecycle, with transport and protocol logic cleanly separated."
@@ -44,4 +44,4 @@ codegen-units = 1
 
 [workspace]
 resolver = "2"
-members = [".", "examples-ws"]
+members = [".", "examples/e2e"]
