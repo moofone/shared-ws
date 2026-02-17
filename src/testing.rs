@@ -105,10 +105,9 @@ impl MockServer {
 
     /// Receive a frame with a timeout.
     pub async fn recv_outbound_timeout(&mut self, timeout: Duration) -> Option<WsFrame> {
-        match tokio::time::timeout(timeout, self.outbound_rx.recv()).await {
-            Ok(frame) => frame,
-            Err(_) => None,
-        }
+        tokio::time::timeout(timeout, self.outbound_rx.recv())
+            .await
+            .unwrap_or_default()
     }
 
     /// Push an inbound frame to the actor.
