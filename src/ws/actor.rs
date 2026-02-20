@@ -23,8 +23,8 @@ use super::types::{
     WsConnectionStats, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
     WsEndpointHandler, WsErrorAction, WsIngress, WsIngressAction, WsLatencyPercentile,
     WsLatencyPolicy, WsMessage, WsMessageAction, WsParseOutcome, WsPayloadLatencySamplingConfig,
-    WsReconnectStrategy, WsRequestMatch, WsSubscriptionAction, WsSubscriptionManager,
-    WsSubscriptionStatus, into_ws_message, message_bytes,
+    WsReconnectStrategy, WsRequestMatch, WsSessionMode, WsSubscriptionAction,
+    WsSubscriptionManager, WsSubscriptionStatus, into_ws_message, message_bytes,
 };
 use super::writer::{
     WriterWrite, WsWriterActor, spawn_writer_supervised_with, spawn_writer_supervisor,
@@ -131,6 +131,9 @@ pub struct WebSocketActor<
     pub metrics: Option<WsMetricsHook>,
     connect_gen: u64,
     connect_in_flight: bool,
+    has_connected_before: bool,
+    session_authenticated: bool,
+    subscriptions_replayed_for_connection: bool,
     connect_task: Option<JoinHandle<()>>,
     reconnect_task: Option<JoinHandle<()>>,
     reconnect_scheduled_at: Option<Instant>,
@@ -240,6 +243,9 @@ where
             metrics,
             connect_gen: 0,
             connect_in_flight: false,
+            has_connected_before: false,
+            session_authenticated: false,
+            subscriptions_replayed_for_connection: false,
             connect_task: None,
             reconnect_task: None,
             reconnect_scheduled_at: None,
@@ -922,7 +928,16 @@ where
         let writer = spawn_writer_supervised_with(writer_sup, writer, writer_shutdown).await;
         self.writer_ref = Some(writer.clone());
 
+        let is_reconnect = self.has_connected_before;
+        self.has_connected_before = true;
+        self.subscriptions_replayed_for_connection = false;
+        self.session_authenticated = matches!(self.handler.session_mode(), WsSessionMode::Public);
+
         self.handler.on_open();
+        if let Some(message) = self.handler.on_connection_opened(is_reconnect) {
+            self.handle_message_action(WsMessageAction::Process(message))
+                .await?;
+        }
 
         let reader_actor_ref = self.actor_ref.clone();
         let reader_connection_label = self.connection_label().to_string();
@@ -1154,6 +1169,30 @@ where
                 .await?;
         }
 
+        if self.should_send_subscriptions_now() {
+            self.replay_subscriptions_with_writer(writer, false).await?;
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn should_send_subscriptions_now(&self) -> bool {
+        match self.handler.session_mode() {
+            WsSessionMode::Public => true,
+            WsSessionMode::AuthGated => self.session_authenticated,
+        }
+    }
+
+    async fn replay_subscriptions_with_writer(
+        &mut self,
+        writer: ActorRef<WsWriterActor<T::Writer>>,
+        force: bool,
+    ) -> WebSocketResult<()> {
+        if !force && self.subscriptions_replayed_for_connection {
+            return Ok(());
+        }
+
         let subscriptions = self.handler.subscription_manager().initial_subscriptions();
         for sub in subscriptions {
             let bytes = self
@@ -1164,7 +1203,25 @@ where
                 .await?;
         }
 
+        self.subscriptions_replayed_for_connection = true;
         Ok(())
+    }
+
+    async fn replay_subscriptions_now(&mut self, force: bool) -> WebSocketResult<()> {
+        if matches!(self.handler.session_mode(), WsSessionMode::AuthGated)
+            && !self.session_authenticated
+        {
+            return Err(WebSocketError::InvalidState(
+                "cannot replay subscriptions before authentication".to_string(),
+            ));
+        }
+
+        let Some(writer) = self.writer_ref.clone() else {
+            return Err(WebSocketError::InvalidState(
+                "writer not available for subscription replay".to_string(),
+            ));
+        };
+        self.replay_subscriptions_with_writer(writer, force).await
     }
 
     async fn process_subscription_update(
@@ -1185,6 +1242,10 @@ where
                 return Err(WebSocketError::InvalidState(err));
             }
         };
+
+        if !self.should_send_subscriptions_now() {
+            return Ok(());
+        }
 
         for message in messages {
             let payload = {
@@ -1350,6 +1411,8 @@ where
         cause: WsDisconnectCause,
     ) -> WebSocketResult<()> {
         self.status = WsConnectionStatus::Disconnected;
+        self.session_authenticated = false;
+        self.subscriptions_replayed_for_connection = false;
         let _ = self.ready_tx.send(false);
         self.connect_in_flight = false;
         if let Some(handle) = self.connect_task.take() {
@@ -2191,6 +2254,19 @@ where
     pub action: WsSubscriptionAction<M>,
 }
 
+/// Message to mark the current connection session authenticated/unauthenticated.
+///
+/// In `WsSessionMode::AuthGated`, setting `authenticated=true` unlocks
+/// subscription replay and incremental subscription sends.
+#[derive(Clone, Copy, Debug)]
+pub struct WsSetAuthenticated {
+    pub authenticated: bool,
+}
+
+/// Message to force replay of desired subscriptions for the current connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WsReplaySubscriptions;
+
 impl<E, R, P, I, T>
     KameoMessage<
         WsSubscriptionUpdate<<E::Subscription as WsSubscriptionManager>::SubscriptionMessage>,
@@ -2212,6 +2288,48 @@ where
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.process_subscription_update(update.action).await
+    }
+}
+
+impl<E, R, P, I, T> KameoMessage<WsSetAuthenticated> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<()>;
+
+    async fn handle(
+        &mut self,
+        msg: WsSetAuthenticated,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.session_authenticated = msg.authenticated;
+        if msg.authenticated {
+            self.replay_subscriptions_now(false).await?;
+        }
+        Ok(())
+    }
+}
+
+impl<E, R, P, I, T> KameoMessage<WsReplaySubscriptions> for WebSocketActor<E, R, P, I, T>
+where
+    E: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    P: WsPingPongStrategy,
+    I: WsIngress<Message = E::Message>,
+    T: WsTransport,
+{
+    type Reply = WebSocketResult<()>;
+
+    async fn handle(
+        &mut self,
+        _msg: WsReplaySubscriptions,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.replay_subscriptions_now(true).await
     }
 }
 

@@ -286,6 +286,17 @@ pub enum WsSubscriptionStatus {
     NotSubscriptionResponse,
 }
 
+/// Session mode for websocket endpoints.
+///
+/// `Public` endpoints can replay subscriptions as soon as the socket opens.
+/// `AuthGated` endpoints must explicitly mark the session authenticated before
+/// any subscription replay or incremental subscription updates are sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsSessionMode {
+    Public,
+    AuthGated,
+}
+
 /// Trait describing a subscription lifecycle for a websocket endpoint.
 pub trait WsSubscriptionManager: Send + Sync + 'static {
     type SubscriptionMessage: Send + 'static;
@@ -384,7 +395,24 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
 
     fn classify_disconnect(&self, cause: &WsDisconnectCause) -> WsDisconnectAction;
 
+    /// Select session behavior for subscription replay.
+    ///
+    /// Default keeps existing behavior: replay on open/reconnect.
+    #[inline]
+    fn session_mode(&self) -> WsSessionMode {
+        WsSessionMode::Public
+    }
+
     fn on_open(&mut self) {}
+
+    /// Called whenever a connection is established.
+    ///
+    /// Return one optional endpoint message to notify the endpoint owner.
+    /// The returned message is routed through `handle_message`.
+    #[inline]
+    fn on_connection_opened(&mut self, _is_reconnect: bool) -> Option<Self::Message> {
+        None
+    }
 
     /// Optional instrumentation hook: emit payload-provided timestamps for distributed lag metrics.
     ///
