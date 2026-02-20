@@ -148,6 +148,19 @@ Connection retries:
 - For delegated-auth endpoints, use `WsSessionMode::AuthGated` + `WsSetAuthenticated` to keep
   replay ordering deterministic (`open -> auth -> replay`).
 
+### Terse Integration Pattern (Delegated Auth + Reconnect)
+
+Use this exact wiring for deterministic reconnect behavior:
+
+1. In `WsEndpointHandler`, return `WsSessionMode::AuthGated`.
+2. Emit an owner signal from `on_connection_opened(is_reconnect)`.
+3. Owner runs delegated auth (for example `ask(WsDelegatedRequest)`).
+4. On auth success, owner sends `WsSetAuthenticated { authenticated: true }`.
+5. Let framework replay automatically, or send `WsReplaySubscriptions` on-demand.
+
+Callout: deep dive and edge cases are in
+[`docs/architecture/reconnection_guide.md`](architecture/reconnection_guide.md).
+
 Request retries:
 
 - `shared-ws` does not implement endpoint-specific request retries.
@@ -219,7 +232,8 @@ Typical patterns:
 - **Liveness**: process is up; optionally require “not permanently disconnected”
 - **Degraded**: high `last_message_age`, frequent reconnects, or recent server/internal errors
 
-See also: [`docs/reconnection_guide.md`](reconnection_guide.md) for deterministic reconnect patterns.
+See also: [`docs/architecture/reconnection_guide.md`](architecture/reconnection_guide.md)
+for deterministic reconnect patterns.
 
 ## Metrics Hook (Optional)
 

@@ -73,7 +73,8 @@ let _ = actor.tell(WebSocketEvent::Connect);
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
-- Reconnection guide: [`docs/reconnection_guide.md`](docs/reconnection_guide.md)
+- Reconnection guide:
+  [`docs/architecture/reconnection_guide.md`](docs/architecture/reconnection_guide.md)
 
 ## License
 
