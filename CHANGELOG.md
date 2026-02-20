@@ -12,7 +12,7 @@
   - no replay before auth
   - reconnect requiring re-auth before replay
   - explicit replay after auth
-- Add a dedicated reconnection guide (`docs/reconnection_guide.md`).
+- Add a dedicated reconnection guide (`docs/architecture/reconnection_guide.md`).
 
 ## 0.1.3 - 2026-02-17
 
