@@ -10,6 +10,10 @@ transport and protocol logic cleanly separated.
 - High-throughput IO: reader/writer tasks run outside the actor runtime; the actor owns policies and
   state.
 - Self-healing reconnects with handler/subscription state preserved across reconnects.
+- Deterministic delegated-auth reconnect support via auth-gated sessions:
+  - `WsSessionMode::AuthGated`
+  - `on_connection_opened(is_reconnect)`
+  - `WsSetAuthenticated` and `WsReplaySubscriptions`
 - Pluggable ping/pong strategies (protocol-level or application-level).
 - Delegated request API: `ask(WsDelegatedRequest)` for "send + await sent/confirmed/rejected/timeout"
   outcomes (endpoint supplies confirmation matching).
@@ -69,6 +73,7 @@ let _ = actor.tell(WebSocketEvent::Connect);
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
+- Reconnection guide: [`docs/reconnection_guide.md`](docs/reconnection_guide.md)
 
 ## License
 
