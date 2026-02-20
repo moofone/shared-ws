@@ -108,6 +108,11 @@ Required methods (most integrations start here):
 Optional hooks:
 
 - `on_open(&mut self)` called after a successful connection is established.
+- `session_mode(&self) -> WsSessionMode`
+  - `Public` (default): replay on open/reconnect.
+  - `AuthGated`: defer replay until `WsSetAuthenticated { authenticated: true }`.
+- `on_connection_opened(&mut self, is_reconnect: bool) -> Option<Message>`
+  - one-shot open/reconnect signal back to your owner.
 - `sample_payload_timestamps_us(&mut self, data, emit)` for low-frequency lag metrics (see “Metrics”).
 
 ## Pluggable Ingress (Mailbox Load Control)
@@ -140,6 +145,8 @@ Connection retries:
 - Endpoint decides what to do after a disconnect via `WsEndpointHandler::classify_disconnect(...)`.
 - Backoff timing comes from `R: WsReconnectStrategy` (use `ExponentialBackoffReconnect` or your own).
 - Optional `WsCircuitBreaker` can suppress connection attempts after repeated failures.
+- For delegated-auth endpoints, use `WsSessionMode::AuthGated` + `WsSetAuthenticated` to keep
+  replay ordering deterministic (`open -> auth -> replay`).
 
 Request retries:
 
@@ -203,12 +210,16 @@ Ask-able messages on `WebSocketActor`:
 - `GetConnectionStatus -> WsConnectionStatus` (`Connecting | Connected | Disconnected`)
 - `GetConnectionStats -> WsConnectionStats` (uptime, last message age, reconnect count, error buffers, RTT percentiles)
 - `WaitForWriter { timeout } -> ()` (readiness gate: actor is ready for application writes; may wait across reconnects)
+- `WsSetAuthenticated { authenticated } -> ()` (auth-gated sessions only; unlock replay/sends when true)
+- `WsReplaySubscriptions -> ()` (explicit on-demand replay of desired subscriptions)
 
 Typical patterns:
 
 - **Readiness**: `GetConnectionStatus == Connected` (or `WaitForWriter`)
 - **Liveness**: process is up; optionally require “not permanently disconnected”
 - **Degraded**: high `last_message_age`, frequent reconnects, or recent server/internal errors
+
+See also: [`docs/reconnection_guide.md`](reconnection_guide.md) for deterministic reconnect patterns.
 
 ## Metrics Hook (Optional)
 
