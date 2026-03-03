@@ -9,9 +9,5 @@ pub trait WsCommandSink<M>: Send + Sync + 'static {
 
 /// Request/reply sink for websocket queries.
 pub trait WsRequestSink<Req, Res>: Send + Sync + 'static {
-    fn ask(
-        &self,
-        req: Req,
-    ) -> impl Future<Output = Result<Res, WebSocketError>> + Send;
+    fn ask(&self, req: Req) -> impl Future<Output = Result<Res, WebSocketError>> + Send;
 }
-
