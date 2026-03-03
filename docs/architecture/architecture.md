@@ -3,7 +3,7 @@
 This crate provides a high-performance WebSocket connection manager designed for:
 
 - Fast IO loops outside the actor runtime.
-- Deterministic state transitions inside a single kameo actor.
+- Deterministic state transitions inside a single runtime actor.
 - Self-healing reconnects with preserved adapter state.
 - Transport-neutral frames (`WsFrame`).
 - A swappable transport boundary (tokio-tungstenite today; fastwebsockets later).
@@ -26,7 +26,7 @@ This crate provides a high-performance WebSocket connection manager designed for
 
 `P: WsPingPongStrategy` handles heartbeats and staleness detection.
 
-`I: WsIngress` is the tight-loop ingress decoder/aggregator/filter that runs outside kameo.
+`I: WsIngress` is the tight-loop ingress decoder/aggregator/filter that runs outside runtime.
 
 The actor:
 

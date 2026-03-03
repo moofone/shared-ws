@@ -1,10 +1,8 @@
-pub mod actor;
 pub mod delegated;
-pub(crate) mod delegated_pending;
 pub mod health;
 pub mod ping;
+pub mod runtime;
 pub mod types;
-pub mod writer;
 
 use std::sync::Arc;
 
@@ -35,6 +33,3 @@ pub trait WsMetricsReporter: Send + Sync + 'static {
 
 /// Convenient alias for passing around boxed metric hooks.
 pub type WsMetricsHook = Arc<dyn WsMetricsReporter>;
-
-pub use actor::*;
-pub use writer::*;

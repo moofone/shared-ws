@@ -3,25 +3,22 @@ name = "shared-ws"
 version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
-description = "High-performance WebSocket infrastructure built around an actor-managed connection lifecycle, with transport and protocol logic cleanly separated."
+description = "High-performance runtime-agnostic WebSocket infrastructure with transport and protocol logic cleanly separated."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/moofone/shared-ws"
 readme = "README.md"
 
 [dependencies]
-anyhow = "1"
 bytes = "1.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 hdrhistogram = "7.5"
 http = "1"
-kameo = { git = "https://github.com/moofone/kameo.git", branch = "main", default-features = false, features = ["tracing"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 sonic-rs = "0.5.6"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "time", "net", "rt", "rt-multi-thread"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots", "connect"] }
-tracing = "0.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -44,4 +41,4 @@ codegen-units = 1
 
 [workspace]
 resolver = "2"
-members = [".", "examples/e2e"]
+members = ["."]

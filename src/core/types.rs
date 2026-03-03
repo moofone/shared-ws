@@ -12,10 +12,10 @@ use super::frame::frame_bytes;
 /// Convenience result alias for websocket operations.
 pub type WebSocketResult<T> = Result<T, WebSocketError>;
 
-/// Ingress decision produced by a tight-loop decoder running outside the actor runtime.
+/// Ingress decision produced by a tight-loop decoder running outside the runtime.
 ///
 /// This allows providers to parse/aggregate/filter in the IO loop, only forwarding the
-/// minimal set of "interesting" events into the actor mailbox.
+/// minimal set of "interesting" events into runtime-owned processing.
 #[derive(Debug)]
 pub enum WsIngressAction<M>
 where
@@ -23,15 +23,15 @@ where
 {
     /// Ignore this frame (still counts as inbound activity for stale detection).
     Ignore,
-    /// Emit an application event into the actor.
+    /// Emit an application event to the runtime integration.
     Emit(M),
-    /// Emit multiple application events into the actor.
+    /// Emit multiple application events to the runtime integration.
     ///
     /// This is useful for protocols that batch many logical updates into a single websocket
     /// frame (e.g., `data: [...]`). The ingress implementation decides batching; the actor
     /// will process the batch in-order.
     EmitBatch(Vec<M>),
-    /// Forward the raw frame to the actor for full handling.
+    /// Forward the raw frame for full handling.
     Forward(WsFrame),
     /// Request reconnect with a reason.
     Reconnect(String),
@@ -39,10 +39,10 @@ where
     Shutdown(String),
 }
 
-/// Tight-loop decoder/aggregator/filter that runs outside kameo (in the reader task).
+/// Tight-loop decoder/aggregator/filter that runs in the reader task.
 ///
-/// The actor owns this state and moves it into the reader task on connect; on disconnect
-/// the state is handed back to the actor to preserve continuity across reconnects.
+/// The runtime owns this state and moves it into the reader task on connect; on disconnect
+/// the state is handed back to preserve continuity across reconnects.
 pub trait WsIngress: Send + 'static {
     type Message: Send + 'static;
 
@@ -53,7 +53,7 @@ pub trait WsIngress: Send + 'static {
     fn on_disconnect(&mut self, _cause: &WsDisconnectCause) {}
 }
 
-/// Default ingress that forwards every frame into the actor.
+/// Default ingress that forwards every frame.
 #[derive(Debug, Clone, Copy)]
 pub struct ForwardAllIngress<M = ()>(PhantomData<fn() -> M>);
 

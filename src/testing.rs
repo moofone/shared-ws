@@ -1,7 +1,4 @@
-//! Reusable test utilities for exercising the websocket actor without a real socket.
-//!
-//! This module is intended for integration tests in downstream crates that need to drive
-//! `WebSocketActor` deterministically (including server-side socket drops).
+//! Reusable test utilities for exercising websocket transport behavior without a real socket.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,7 +19,7 @@ use crate::ws::{
 /// A transport that uses in-memory channels so tests can emulate server behavior.
 ///
 /// Create it with [`MockTransport::channel_pair`] to obtain both:
-/// - the transport for `WebSocketActor`
+/// - the transport under test
 /// - a [`MockServer`] handle used by tests to receive outbound frames, push inbound frames,
 ///   or drop the socket.
 #[derive(Clone)]
@@ -98,7 +95,7 @@ pub struct MockServer {
 }
 
 impl MockServer {
-    /// Receive a frame written by the actor to the websocket writer.
+    /// Receive a frame written by the websocket writer.
     pub async fn recv_outbound(&mut self) -> Option<WsFrame> {
         self.outbound_rx.recv().await
     }
@@ -110,7 +107,7 @@ impl MockServer {
             .unwrap_or_default()
     }
 
-    /// Push an inbound frame to the actor.
+    /// Push an inbound frame to the reader side.
     pub fn send_inbound(&self, frame: WsFrame) -> Result<(), MockServerError> {
         let Some(tx) = self.inbound_tx.as_ref() else {
             return Err(MockServerError::SocketDropped);

@@ -12,7 +12,7 @@ pub type WsTransportConnectFuture<R, W> =
 
 /// Transport boundary for websocket IO.
 ///
-/// The IO loop is expected to live outside kameo; the actor owns state and policies.
+/// The IO loop is expected to live outside runtime integration code.
 ///
 /// This trait is intentionally minimal so different websocket implementations can be swapped
 /// (tokio-tungstenite vs fastwebsockets) while keeping protocol/state logic unchanged.
