@@ -12,8 +12,8 @@ For more complete, runnable integrations, see `examples/e2e/`.
 
 `shared-ws` provides:
 
-- `WebSocketActor<E, R, P, I, T>`: a kameo actor that owns connection lifecycle + policies.
-- A reader task (outside kameo) that runs ingress decode and forwards minimal events into the actor.
+- `WebSocketActor<E, R, P, I, T>`: a runtime actor that owns connection lifecycle + policies.
+- A reader task (outside runtime) that runs ingress decode and forwards minimal events into the actor.
 - A supervised `WsWriterActor` that owns the transport writer.
 - Health stats via `WsHealthMonitor` (exposed through ask-able messages).
 - Delegated requests (`ask(WsDelegatedRequest)`) for “send + await sent/confirmed/rejected/timeout”.
@@ -117,7 +117,7 @@ Optional hooks:
 
 ## Pluggable Ingress (Mailbox Load Control)
 
-`WsIngress` runs in the reader task (outside kameo) and can:
+`WsIngress` runs in the reader task (outside runtime) and can:
 
 - Drop frames (`WsIngressAction::Ignore`)
 - Emit compact application events (`Emit`/`EmitBatch`)
@@ -208,7 +208,7 @@ See `examples/e2e/src/coordinator.rs` for a full pattern using `shared-rate_limi
 
 There is no rate limiter actor inside this crate.
 
-If you implement your coordinator as a kameo actor and want discovery-by-name:
+If you implement your coordinator as a runtime actor and want discovery-by-name:
 
 - register the websocket actor via `WebSocketActorArgs.registration = Some(WsActorRegistration::new("..."))`
 - choose a stable application-level name for your coordinator (for example `"rate_limiter"`), and

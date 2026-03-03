@@ -37,15 +37,15 @@ flowchart TD
 
 On each successful handshake, the actor establishes three runtime pieces:
 
-- **Reader task** (Tokio task, outside kameo): reads frames, runs ingress, forwards events.
-- **Writer actor** (kameo actor, supervised): serializes and sends outbound frames.
+- **Reader task** (Tokio task, outside runtime): reads frames, runs ingress, forwards events.
+- **Writer actor** (runtime actor, supervised): serializes and sends outbound frames.
 - **Ping loop task** (Tokio task, optional): periodically tells the actor to `SendPing` and
   `CheckStale`.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'background':'#0b1020','primaryColor':'#111a2e','primaryBorderColor':'#334155','primaryTextColor':'#e5e7eb','secondaryColor':'#0f172a','secondaryBorderColor':'#334155','secondaryTextColor':'#e5e7eb','tertiaryColor':'#0b1020','tertiaryBorderColor':'#334155','tertiaryTextColor':'#e5e7eb','lineColor':'#93c5fd','textColor':'#e5e7eb','noteBkgColor':'#0f172a','noteTextColor':'#e5e7eb','actorBkg':'#0f172a','actorBorder':'#334155','actorTextColor':'#e5e7eb','activationBkgColor':'#111a2e','activationBorderColor':'#334155','fontFamily':'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace'}}}%%
 flowchart LR
-  subgraph A["WebSocketActor (kameo)"]
+  subgraph A["WebSocketActor (runtime)"]
     H["handler: WsEndpointHandler<br/>(includes subscription state)"]
     P["ping: WsPingPongStrategy"]
     R["reconnect: WsReconnectStrategy"]
@@ -57,7 +57,7 @@ flowchart LR
     IO["transport reader loop"]
   end
 
-  subgraph WT["Writer Actor (kameo)"]
+  subgraph WT["Writer Actor (runtime)"]
     W["WsWriterActor"]
   end
 
