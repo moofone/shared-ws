@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-03-03
+
+- Breaking change: remove all actor-runtime-specific modules and APIs from `shared-ws`.
+- Remove `kameo` dependency and actor-coupled test/example surfaces.
+- Add runtime-agnostic websocket integration traits under `src/ws/runtime.rs`.
+- Keep core transport/protocol primitives and utilities as the crate surface.
+
 ## 0.1.4 - 2026-02-20
 
 - Add deterministic auth-gated session control for reconnect flows:

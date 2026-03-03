@@ -1,6 +1,6 @@
 [package]
 name = "shared-ws"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "High-performance runtime-agnostic WebSocket infrastructure with transport and protocol logic cleanly separated."
