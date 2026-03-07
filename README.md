@@ -70,6 +70,31 @@ let _ = actor.ask(req);
 let _ = actor.tell(WebSocketEvent::Connect);
 ```
 
+## Boundary Fixture Rule
+
+When `shared-ws` is used behind an exchange or external-contract boundary, the owning boundary
+actor should keep raw websocket contract fixtures under its own `test/fixtures/` tree, split by
+message type.
+
+Recommended pattern:
+
+- raw WS fixtures live on the boundary actor only
+- split fixture groups by contract/message family, for example:
+  - `session/`
+  - `orders/`
+  - `balances/`
+  - `positions/`
+  - `fills/`
+  - `market_data/`
+- downstream business actors do not duplicate raw exchange websocket payloads
+- every registered live WS contract has a required fixture entry and a replay test using
+  `MockTransport` / `ReconnectableMockTransport`
+- live WS startup should be blocked unless the required fixture inventory exists, except for
+  explicit fixture-capture mode
+
+`shared-ws::testing` gives the transport surface for deterministic replay; callers should add a
+small fixture catalog/scenario layer on top so contract coverage is enforced rather than remembered.
+
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
