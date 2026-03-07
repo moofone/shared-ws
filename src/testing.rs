@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -43,6 +44,58 @@ impl MockTransport {
                 inbound_tx: Some(inbound_tx),
             },
         )
+    }
+}
+
+/// A transport that supports sequential reconnects by creating a fresh in-memory
+/// socket pair on every `connect()` call.
+#[derive(Clone)]
+pub struct ReconnectableMockTransport {
+    conn_seq: Arc<AtomicUsize>,
+    server_tx: mpsc::UnboundedSender<ReconnectableMockConnection>,
+}
+
+impl ReconnectableMockTransport {
+    pub fn channel_pair() -> (Self, ReconnectableMockServer) {
+        let (server_tx, server_rx) = mpsc::unbounded_channel::<ReconnectableMockConnection>();
+        (
+            Self {
+                conn_seq: Arc::new(AtomicUsize::new(0)),
+                server_tx,
+            },
+            ReconnectableMockServer { conn_rx: server_rx },
+        )
+    }
+}
+
+impl WsTransport for ReconnectableMockTransport {
+    type Reader = MockReader;
+    type Writer = MockWriter;
+
+    fn connect(
+        &self,
+        _url: String,
+        _buffers: WebSocketBufferConfig,
+    ) -> WsTransportConnectFuture<Self::Reader, Self::Writer> {
+        let server_tx = self.server_tx.clone();
+        let conn_seq = Arc::clone(&self.conn_seq);
+        Box::pin(async move {
+            let conn_id = conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let (sent_tx, sent_rx) = mpsc::unbounded_channel::<WsFrame>();
+            let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<WsFrame>();
+            server_tx
+                .send(ReconnectableMockConnection {
+                    conn_id,
+                    outbound_rx: sent_rx,
+                    inbound_tx: Some(inbound_tx),
+                })
+                .map_err(|_| {
+                    WebSocketError::InvalidState(
+                        "reconnectable mock server receiver dropped".to_string(),
+                    )
+                })?;
+            Ok((MockReader { rx: inbound_rx }, MockWriter { sent_tx }))
+        })
     }
 }
 
@@ -121,6 +174,64 @@ impl MockServer {
     }
 
     /// Simulate server-side socket drop by closing the inbound channel.
+    pub fn drop_socket(&mut self) {
+        self.inbound_tx = None;
+    }
+}
+
+/// Server-side handle for transports that support reconnects.
+pub struct ReconnectableMockServer {
+    conn_rx: mpsc::UnboundedReceiver<ReconnectableMockConnection>,
+}
+
+impl ReconnectableMockServer {
+    pub async fn accept_connection(&mut self) -> Option<ReconnectableMockConnection> {
+        self.conn_rx.recv().await
+    }
+
+    pub async fn accept_connection_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Option<ReconnectableMockConnection> {
+        tokio::time::timeout(timeout, self.conn_rx.recv())
+            .await
+            .unwrap_or_default()
+    }
+}
+
+/// Per-connection server-side control handle for [`ReconnectableMockTransport`].
+pub struct ReconnectableMockConnection {
+    conn_id: usize,
+    outbound_rx: mpsc::UnboundedReceiver<WsFrame>,
+    inbound_tx: Option<mpsc::UnboundedSender<WsFrame>>,
+}
+
+impl ReconnectableMockConnection {
+    pub fn conn_id(&self) -> usize {
+        self.conn_id
+    }
+
+    pub async fn recv_outbound(&mut self) -> Option<WsFrame> {
+        self.outbound_rx.recv().await
+    }
+
+    pub async fn recv_outbound_timeout(&mut self, timeout: Duration) -> Option<WsFrame> {
+        tokio::time::timeout(timeout, self.outbound_rx.recv())
+            .await
+            .unwrap_or_default()
+    }
+
+    pub fn send_inbound(&self, frame: WsFrame) -> Result<(), MockServerError> {
+        let Some(tx) = self.inbound_tx.as_ref() else {
+            return Err(MockServerError::SocketDropped);
+        };
+        tx.send(frame).map_err(|_| MockServerError::ChannelClosed)
+    }
+
+    pub fn send_text(&self, text: impl AsRef<str>) -> Result<(), MockServerError> {
+        self.send_inbound(into_ws_message(text.as_ref().as_bytes().to_vec()))
+    }
+
     pub fn drop_socket(&mut self) {
         self.inbound_tx = None;
     }
@@ -341,4 +452,54 @@ fn is_ws(byte: u8) -> bool {
 /// Utility helper for tests validating JSON-RPC ids on outbound frames.
 pub fn frame_jsonrpc_id(frame: &WsFrame) -> Option<u64> {
     parse_jsonrpc_id(frame_bytes(frame)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+
+    #[tokio::test]
+    async fn reconnectable_mock_transport_supports_multiple_sequential_connections() {
+        let (transport, mut server) = ReconnectableMockTransport::channel_pair();
+
+        let (mut reader1, mut writer1) = transport
+            .connect("ws://mock.invalid".to_string(), WebSocketBufferConfig::default())
+            .await
+            .expect("first connect should succeed");
+        let mut conn1 = server
+            .accept_connection_timeout(Duration::from_secs(1))
+            .await
+            .expect("first connection should arrive");
+        assert_eq!(conn1.conn_id(), 1);
+        writer1
+            .send(into_ws_message(br#"{"hello":"one"}"#.to_vec()))
+            .await
+            .expect("writer should send");
+        assert!(conn1.recv_outbound_timeout(Duration::from_secs(1)).await.is_some());
+        conn1.send_text(r#"{"server":"one"}"#)
+            .expect("server should send inbound");
+        assert!(reader1.next().await.is_some());
+        conn1.drop_socket();
+        drop(writer1);
+        drop(reader1);
+
+        let (mut reader2, mut writer2) = transport
+            .connect("ws://mock.invalid".to_string(), WebSocketBufferConfig::default())
+            .await
+            .expect("second connect should succeed");
+        let mut conn2 = server
+            .accept_connection_timeout(Duration::from_secs(1))
+            .await
+            .expect("second connection should arrive");
+        assert_eq!(conn2.conn_id(), 2);
+        writer2
+            .send(into_ws_message(br#"{"hello":"two"}"#.to_vec()))
+            .await
+            .expect("writer should send");
+        assert!(conn2.recv_outbound_timeout(Duration::from_secs(1)).await.is_some());
+        conn2.send_text(r#"{"server":"two"}"#)
+            .expect("server should send inbound");
+        assert!(reader2.next().await.is_some());
+    }
 }
