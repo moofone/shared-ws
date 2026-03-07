@@ -9,7 +9,7 @@ const SHARED_WS_FIXTURE_CAPTURE_MODE_ENV: &str = "SHARED_WS_FIXTURE_CAPTURE_MODE
 pub struct WsFixtureRequirement {
     pub contract_id: String,
     pub success_path: PathBuf,
-    pub error_path: PathBuf,
+    pub error_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -61,12 +61,17 @@ pub fn ensure_live_ws_allowed() -> Result<(), WebSocketError> {
         ));
     }
     for item in &guard.requirements {
-        if !item.success_path.exists() || !item.error_path.exists() {
+        let success_exists = item.success_path.exists();
+        let error_exists = item.error_path.as_ref().map(|p| p.exists()).unwrap_or(true);
+        if !(success_exists && error_exists) {
             return Err(WebSocketError::InvalidState(format!(
                 "live websocket blocked: missing fixture files for contract={} success={} error={}",
                 item.contract_id,
                 item.success_path.display(),
-                item.error_path.display()
+                item.error_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<not-required>".to_string())
             )));
         }
     }
