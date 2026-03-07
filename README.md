@@ -89,8 +89,15 @@ Recommended pattern:
 - downstream business actors do not duplicate raw exchange websocket payloads
 - every registered live WS contract has a required fixture entry and a replay test using
   `MockTransport` / `ReconnectableMockTransport`
-- live WS startup should be blocked unless the required fixture inventory exists, except for
-  explicit fixture-capture mode
+- compliant fixtures must carry live provenance metadata:
+  - `source = "live_capture"`
+  - `captured_at_ms`
+  - `capture_command`
+  - `exchange_env`
+- synthesized or malformed fixtures belong in a separate robustness bucket and do not satisfy
+  live contract compliance
+- live WS startup should be blocked unless the required fixture inventory exists and those
+  fixtures are compliant live captures, except for explicit fixture-capture mode
 
 `shared-ws::testing` gives the transport surface for deterministic replay; callers should add a
 small fixture catalog/scenario layer on top so contract coverage is enforced rather than remembered.
