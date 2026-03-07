@@ -15,6 +15,7 @@ use tokio_tungstenite::{
 };
 
 use crate::core::{WebSocketBufferConfig, WebSocketError, WsCloseFrame, WsFrame, WsText};
+use crate::fixture_policy;
 use crate::tls::install_rustls_crypto_provider;
 use crate::transport::WsTransport;
 
@@ -167,6 +168,7 @@ impl WsTransport for TungsteniteTransport {
     {
         let connector = self.connector.clone();
         Box::pin(async move {
+            fixture_policy::ensure_live_ws_allowed()?;
             install_rustls_crypto_provider();
 
             let config = build_ws_config(buffers);
