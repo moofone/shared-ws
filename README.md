@@ -96,6 +96,12 @@ Recommended pattern:
   - `exchange_env`
 - synthesized or malformed fixtures belong in a separate robustness bucket and do not satisfy
   live contract compliance
+- registered WS fixture contracts validate that live websocket startup is allowed; they do not
+  replay fixture frames into the runtime
+- normal mode still opens the real websocket only after fixture existence/provenance validation
+  passes
+- explicit fixture-capture mode bypasses the gate so capture workflows can refresh fixtures, and
+  still opens the real websocket
 - live WS startup should be blocked unless the required fixture inventory exists and those
   fixtures are compliant live captures, except for explicit fixture-capture mode
 

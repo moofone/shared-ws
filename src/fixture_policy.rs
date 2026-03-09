@@ -123,6 +123,39 @@ pub fn ensure_live_ws_allowed() -> Result<(), WebSocketError> {
     Ok(())
 }
 
+pub fn validate_required_ws_contracts(
+    requirements: &[WsFixtureRequirement],
+) -> Result<(), WebSocketError> {
+    if requirements.is_empty() {
+        return Err(WebSocketError::InvalidState(
+            "required websocket fixture validation failed: no fixture contracts registered"
+                .to_string(),
+        ));
+    }
+
+    for item in requirements {
+        let success_exists = item.success_path.exists();
+        let error_exists = item.error_path.as_ref().map(|p| p.exists()).unwrap_or(true);
+        if !(success_exists && error_exists) {
+            return Err(WebSocketError::InvalidState(format!(
+                "required websocket fixture validation failed: missing fixture files for contract={} success={} error={}",
+                item.contract_id,
+                item.success_path.display(),
+                item.error_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<not-required>".to_string())
+            )));
+        }
+        ensure_live_capture_fixture(&item.success_path)?;
+        if let Some(error_path) = &item.error_path {
+            ensure_live_capture_fixture(error_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +184,9 @@ mod tests {
     #[test]
     fn live_ws_requires_registered_contracts() {
         clear_required_ws_contracts_for_tests();
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
         let err = ensure_live_ws_allowed().expect_err("missing registry should fail");
         assert!(err.to_string().contains("no required fixture contracts registered"));
     }
@@ -158,6 +194,9 @@ mod tests {
     #[test]
     fn live_ws_rejects_non_live_capture_fixtures() {
         clear_required_ws_contracts_for_tests();
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
         let success = temp_path("success.json");
         let error = temp_path("error.json");
         let _ = std::fs::remove_file(&success);
@@ -180,6 +219,9 @@ mod tests {
     #[test]
     fn live_ws_accepts_live_capture_fixtures() {
         clear_required_ws_contracts_for_tests();
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
         let success = temp_path("good-success.json");
         let error = temp_path("good-error.json");
         let _ = std::fs::remove_file(&success);
@@ -192,6 +234,58 @@ mod tests {
             error_path: Some(error.clone()),
         }]);
         ensure_live_ws_allowed().expect("live-captured fixtures should pass");
+        let _ = std::fs::remove_file(success);
+        let _ = std::fs::remove_file(error);
+    }
+
+    #[test]
+    fn validator_requires_registered_contracts() {
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
+        let err = validate_required_ws_contracts(&[])
+            .expect_err("empty requirement list should fail validation");
+        assert!(err.to_string().contains("no fixture contracts registered"));
+    }
+
+    #[test]
+    fn validator_rejects_missing_fixture_files() {
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
+        let success = temp_path("validator-missing-success.json");
+        let error = temp_path("validator-missing-error.json");
+        let _ = std::fs::remove_file(&success);
+        let _ = std::fs::remove_file(&error);
+
+        let err = validate_required_ws_contracts(&[WsFixtureRequirement {
+            contract_id: "contract-a".to_string(),
+            success_path: success.clone(),
+            error_path: Some(error.clone()),
+        }])
+        .expect_err("missing files should fail validation");
+        assert!(err.to_string().contains("missing fixture files"));
+    }
+
+    #[test]
+    fn validator_accepts_live_capture_fixtures() {
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+        }
+        let success = temp_path("validator-good-success.json");
+        let error = temp_path("validator-good-error.json");
+        let _ = std::fs::remove_file(&success);
+        let _ = std::fs::remove_file(&error);
+        write_fixture(success.as_path(), "live_capture");
+        write_fixture(error.as_path(), "live_capture");
+
+        validate_required_ws_contracts(&[WsFixtureRequirement {
+            contract_id: "contract-a".to_string(),
+            success_path: success.clone(),
+            error_path: Some(error.clone()),
+        }])
+        .expect("live-captured fixtures should pass validation");
+
         let _ = std::fs::remove_file(success);
         let _ = std::fs::remove_file(error);
     }
