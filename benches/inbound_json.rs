@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use serde::Deserialize;
 use sonic_rs::JsonContainerTrait;
 use sonic_rs::JsonValueTrait;
 use sonic_rs::PointerTree;
@@ -289,39 +288,6 @@ fn parse_f64_lexical(s: &str) -> f64 {
     lexical_core::parse::<f64>(s.as_bytes()).unwrap_or(f64::NAN)
 }
 
-#[derive(Debug, Deserialize)]
-struct BybitFrame<'a> {
-    #[serde(borrow)]
-    data: Vec<BybitTradeRow<'a>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BybitTradeRow<'a> {
-    #[serde(rename = "T")]
-    t: i64,
-    #[serde(borrow, rename = "p")]
-    p: &'a str,
-    #[serde(borrow, rename = "v")]
-    v: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeribitFrame {
-    params: DeribitParams,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeribitParams {
-    data: Vec<DeribitTradeRow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeribitTradeRow {
-    timestamp: i64,
-    price: f64,
-    amount: f64,
-}
-
 fn bench_bybit_trade_frame_dom_vs_lazy(c: &mut Criterion) {
     const TOTAL_TRADES: usize = 100_000;
     for trades_per_frame in [1usize, 10, 50, 200] {
@@ -435,12 +401,18 @@ fn bench_bybit_trade_frame_dom_vs_lazy(c: &mut Criterion) {
                 b.iter(|| {
                     let mut sum = 0.0f64;
                     for _ in 0..frames {
-                        let v: BybitFrame<'_> =
-                            sonic_rs::from_slice(black_box(payload.as_ref())).unwrap();
-                        for row in &v.data {
-                            let ts = row.t as f64;
-                            let p = parse_f64_lexical(row.p);
-                            let q = parse_f64_lexical(row.v);
+                        let v: Value = sonic_rs::from_slice(black_box(payload.as_ref())).unwrap();
+                        let data = v.get("data").and_then(|x| x.as_array()).unwrap();
+                        for row in data {
+                            let ts = row.get("T").and_then(|x| x.as_i64()).unwrap_or(0) as f64;
+                            let p = row
+                                .get("p")
+                                .and_then(|x| x.as_str().map(parse_f64_lexical))
+                                .unwrap_or(0.0);
+                            let q = row
+                                .get("v")
+                                .and_then(|x| x.as_str().map(parse_f64_lexical))
+                                .unwrap_or(0.0);
                             sum += ts + p + q;
                         }
                     }
@@ -560,10 +532,18 @@ fn bench_deribit_trade_frame_dom_vs_lazy(c: &mut Criterion) {
                 b.iter(|| {
                     let mut sum = 0.0f64;
                     for _ in 0..frames {
-                        let v: DeribitFrame =
-                            sonic_rs::from_slice(black_box(payload.as_ref())).unwrap();
-                        for row in &v.params.data {
-                            sum += (row.timestamp as f64) + row.price + row.amount;
+                        let v: Value = sonic_rs::from_slice(black_box(payload.as_ref())).unwrap();
+                        let data = v
+                            .get("params")
+                            .and_then(|x| x.get("data"))
+                            .and_then(|x| x.as_array())
+                            .unwrap();
+                        for row in data {
+                            let ts =
+                                row.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0) as f64;
+                            let p = row.get("price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                            let q = row.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                            sum += ts + p + q;
                         }
                     }
                     black_box(sum);

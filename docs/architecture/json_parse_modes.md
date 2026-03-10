@@ -17,7 +17,7 @@ from a single frame buffer. Partial parsing must either:
 
 ## Goals
 
-- Support endpoints that need **full JSON -> typed struct** (Serde) for some message types.
+- Support endpoints that need **full JSON -> typed struct** for some message types.
 - Support endpoints that need **only a few fields** for hot-path messages.
 - Support **hybrid routing**: inspect a tiny set of fields first, then decide `Ignore` vs `Partial` vs `Full`.
 
@@ -35,14 +35,19 @@ from a single frame buffer. Partial parsing must either:
 
 Use when you truly need the entire payload, but prefer a typed struct over a DOM.
 
+If the project is avoiding Serde-derived ingestion types, this mode should mean:
+
+- parse with `sonic-rs`
+- map directly into owned Rust structs in one pass
+- keep any borrowed/lazy access scoped to the source frame buffer
+
 Pattern (ingress):
 
 ```rust
 use shared_ws::ws::{WsFrame, WsIngress, WsIngressAction, WsDisconnectCause};
 
-#[derive(serde::Deserialize, Debug)]
 struct FullMsg {
-    // owned fields (String, Vec, etc) are 'static-friendly
+    // owned fields remain 'static-friendly once copied/mapped out of the frame
     kind: String,
     // ...
 }
@@ -62,9 +67,14 @@ impl WsIngress for FullIngress {
             return WsIngressAction::Ignore;
         };
 
-        match sonic_rs::from_str::<FullMsg>(text) {
-            Ok(m) => WsIngressAction::Emit(m),
-            Err(_) => WsIngressAction::Ignore,
+        let kind = sonic_rs::get(text, &["kind"])
+            .ok()
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        match kind {
+            Some(kind) => WsIngressAction::Emit(FullMsg { kind }),
+            None => WsIngressAction::Ignore,
         }
     }
 }
@@ -72,7 +82,7 @@ impl WsIngress for FullIngress {
 
 Notes:
 
-- `sonic_rs::from_str` avoids UTF-8 validation because `&str` is already valid UTF-8.
+- `sonic_rs::get` avoids building a full DOM when you only need a subset of fields.
 - If your transport guarantees text UTF-8 and you want max speed, you can justify
   `unsafe { std::str::from_utf8_unchecked(...) }` locally (with a `debug_assert!`).
 
@@ -163,4 +173,3 @@ Ingress then emits `AppMsg` variants.
   - `get_many_only` (PointerTree)
 - Add a hybrid bench that classifies and then does partial/full based on a skewed distribution
   (e.g., 99% hot messages, 1% full decode).
-
