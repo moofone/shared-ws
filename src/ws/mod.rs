@@ -1,5 +1,6 @@
 pub mod delegated;
 pub mod health;
+pub mod managed;
 pub mod ping;
 pub mod runtime;
 pub mod types;
@@ -17,6 +18,7 @@ pub use crate::core::reconnect::ExponentialBackoffReconnect;
 pub use crate::core::types::*;
 
 pub use delegated::*;
+pub use managed::*;
 
 /// Hook interface for surfacing websocket metrics without coupling to
 /// chain-specific observability actors.
