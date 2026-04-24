@@ -414,6 +414,19 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
         None
     }
 
+    /// Called whenever an established connection disconnects or a connection attempt fails.
+    ///
+    /// Return one optional endpoint message to notify the endpoint owner. The returned message
+    /// is routed through `handle_message`.
+    #[inline]
+    fn on_connection_disconnected(
+        &mut self,
+        _cause: &WsDisconnectCause,
+        _will_reconnect: bool,
+    ) -> Option<Self::Message> {
+        None
+    }
+
     /// Optional instrumentation hook: emit payload-provided timestamps for distributed lag metrics.
     ///
     /// This is called only when the websocket actor's payload latency sampling is enabled and a
