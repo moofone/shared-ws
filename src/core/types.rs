@@ -251,6 +251,7 @@ pub enum WsConnectionStatus {
 #[derive(Debug, Clone)]
 pub enum WsMessageAction<T> {
     Continue,
+    SessionAuthenticated,
     Process(T),
     Reconnect(String),
     Shutdown,
@@ -426,6 +427,20 @@ pub trait WsEndpointHandler: Send + Sync + 'static {
     ) -> Option<Self::Message> {
         None
     }
+
+    /// Called for every inbound frame before endpoint parsing.
+    ///
+    /// Default is a no-op. Endpoints that need fixture capture or diagnostics can override this
+    /// without changing the managed socket loop.
+    #[inline]
+    fn on_inbound_frame(&mut self, _frame: &WsFrame) {}
+
+    /// Called immediately before an outbound frame is written to the socket.
+    ///
+    /// Default is a no-op. Endpoints that need fixture capture or diagnostics can override this
+    /// without changing the managed socket loop.
+    #[inline]
+    fn on_outbound_frame(&mut self, _frame: &WsFrame) {}
 
     /// Optional instrumentation hook: emit payload-provided timestamps for distributed lag metrics.
     ///

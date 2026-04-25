@@ -35,7 +35,7 @@ The actor:
 - Runs subscription/auth orchestration and disconnect classification inside the actor.
 - Optionally supports "send + await outcome" flows via `ask(WsDelegatedRequest)` (see below).
 
-### Reader Task (Outside Kameo)
+### Reader Task (Outside Actor Runtime)
 
 The reader runs in a dedicated Tokio task and does:
 
@@ -58,7 +58,7 @@ Stale detection continuity:
 - Even if ingress ignores all frames, the reader task periodically emits `WebSocketEvent::InboundActivity`
   so `WsHealthMonitor` does not incorrectly mark the connection stale.
 
-### Writer Actor (Kameo)
+### Writer Actor
 
 `WsWriterActor` owns the transport writer (`T::Writer`) and provides:
 

@@ -21,13 +21,12 @@ impl WsFixture {
                 path.display()
             ))
         })?;
-        let root =
-            sonic_rs::from_slice::<sonic_rs::Value>(&bytes).map_err(|err| {
-                WebSocketError::ParseFailed(format!(
-                    "failed to parse websocket fixture {}: {err}",
-                    path.display()
-                ))
-            })?;
+        let root = sonic_rs::from_slice::<sonic_rs::Value>(&bytes).map_err(|err| {
+            WebSocketError::ParseFailed(format!(
+                "failed to parse websocket fixture {}: {err}",
+                path.display()
+            ))
+        })?;
         let text = root.get("text").ok_or_else(|| {
             WebSocketError::InvalidState(format!(
                 "websocket fixture {} missing text",
@@ -59,7 +58,8 @@ impl WsFixture {
     }
 
     pub fn write(&self, path: &Path) -> Result<(), WebSocketError> {
-        let text = encode_embedded_json_value(self.text.as_str()).map_err(WebSocketError::InvalidState)?;
+        let text =
+            encode_embedded_json_value(self.text.as_str()).map_err(WebSocketError::InvalidState)?;
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "capture_command": self.capture_command,
             "captured_at_ms": self.captured_at_ms,

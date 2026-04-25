@@ -24,7 +24,9 @@ fn registry() -> &'static Mutex<WsFixtureRegistry> {
     REGISTRY.get_or_init(|| Mutex::new(WsFixtureRegistry::default()))
 }
 
-pub fn register_required_ws_contracts(requirements: impl IntoIterator<Item = WsFixtureRequirement>) {
+pub fn register_required_ws_contracts(
+    requirements: impl IntoIterator<Item = WsFixtureRequirement>,
+) {
     let mut guard = registry().lock().expect("ws fixture registry poisoned");
     guard.requirements = requirements.into_iter().collect();
 }
@@ -65,7 +67,10 @@ fn ensure_live_capture_fixture(path: &PathBuf) -> Result<(), WebSocketError> {
             path.display()
         ))
     })?;
-    let source = root.get("source").and_then(|value| value.as_str()).unwrap_or("");
+    let source = root
+        .get("source")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let captured_at_ms = root
         .get("captured_at_ms")
         .and_then(|value| value.as_u64())
@@ -188,7 +193,10 @@ mod tests {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
         }
         let err = ensure_live_ws_allowed().expect_err("missing registry should fail");
-        assert!(err.to_string().contains("no required fixture contracts registered"));
+        assert!(
+            err.to_string()
+                .contains("no required fixture contracts registered")
+        );
     }
 
     #[test]
@@ -209,9 +217,10 @@ mod tests {
             error_path: Some(error.clone()),
         }]);
         let err = ensure_live_ws_allowed().expect_err("non-live provenance should fail");
-        assert!(err
-            .to_string()
-            .contains("not compliant live-capture provenance"));
+        assert!(
+            err.to_string()
+                .contains("not compliant live-capture provenance")
+        );
         let _ = std::fs::remove_file(success);
         let _ = std::fs::remove_file(error);
     }
