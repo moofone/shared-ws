@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::transport::WsTransport;
 use crate::ws::{
@@ -21,10 +23,87 @@ pub enum ManagedWsCommand<S = ()> {
     Shutdown,
 }
 
+pub type ManagedWsCommandReceiver<S = ()> = mpsc::UnboundedReceiver<ManagedWsCommand<S>>;
+pub type ManagedWsCommandSender<S = ()> = mpsc::UnboundedSender<ManagedWsCommand<S>>;
+
 #[derive(Debug)]
 pub struct ManagedWsRuntime {
-    pub cmd_tx: mpsc::UnboundedSender<ManagedWsCommand>,
+    pub cmd_tx: ManagedWsCommandSender,
     pub status: Arc<AtomicU8>,
+}
+
+#[derive(Debug)]
+pub struct ManagedWsLoopHandle<S = ()> {
+    pub cmd_tx: ManagedWsCommandSender<S>,
+    pub status: Arc<AtomicU8>,
+    loop_handle: Option<JoinHandle<()>>,
+}
+
+impl<S> ManagedWsLoopHandle<S> {
+    #[inline]
+    pub fn status_snapshot(&self) -> WsConnectionStatus {
+        ws_status_from_u8(self.status.load(Ordering::Relaxed))
+    }
+
+    pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> Result<(), String> {
+        self.cmd_tx
+            .send(ManagedWsCommand::Shutdown)
+            .map_err(|err| format!("failed to enqueue websocket shutdown: {err}"))?;
+        if let Some(loop_handle) = self.loop_handle.take()
+            && tokio::time::timeout(timeout, loop_handle).await.is_err()
+        {
+            return Err(format!(
+                "websocket loop did not stop within {} ms",
+                timeout.as_millis()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<S> Drop for ManagedWsLoopHandle<S> {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(ManagedWsCommand::Shutdown);
+        if let Some(loop_handle) = self.loop_handle.take() {
+            loop_handle.abort();
+        }
+    }
+}
+
+pub fn spawn_managed_ws_task<S, F, Fut>(future_factory: F) -> ManagedWsLoopHandle<S>
+where
+    S: Send + 'static,
+    F: FnOnce(ManagedWsCommandReceiver<S>, Arc<AtomicU8>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let status = Arc::new(AtomicU8::new(ws_status_to_u8(
+        WsConnectionStatus::Disconnected,
+    )));
+    let loop_handle = tokio::spawn(future_factory(cmd_rx, Arc::clone(&status)));
+    ManagedWsLoopHandle {
+        cmd_tx,
+        status,
+        loop_handle: Some(loop_handle),
+    }
+}
+
+pub fn spawn_managed_ws_loop<T, H, R>(
+    url: String,
+    transport: T,
+    handler: H,
+    reconnect: R,
+) -> ManagedWsLoopHandle<
+    <<H as WsEndpointHandler>::Subscription as WsSubscriptionManager>::SubscriptionMessage,
+>
+where
+    T: WsTransport + Send + 'static,
+    H: WsEndpointHandler,
+    R: WsReconnectStrategy + Send + 'static,
+{
+    spawn_managed_ws_task(move |cmd_rx, status| {
+        run_managed_ws_loop(url, transport, handler, reconnect, status, cmd_rx)
+    })
 }
 
 #[inline]
@@ -154,10 +233,8 @@ pub async fn run_managed_ws_loop<T, H, R>(
     mut handler: H,
     mut reconnect: R,
     status: Arc<AtomicU8>,
-    mut cmd_rx: mpsc::UnboundedReceiver<
-        ManagedWsCommand<
-            <<H as WsEndpointHandler>::Subscription as WsSubscriptionManager>::SubscriptionMessage,
-        >,
+    mut cmd_rx: ManagedWsCommandReceiver<
+        <<H as WsEndpointHandler>::Subscription as WsSubscriptionManager>::SubscriptionMessage,
     >,
 ) where
     T: WsTransport,
@@ -413,7 +490,7 @@ where
 
 async fn wait_reconnect_delay_or_shutdown<S>(
     delay: Duration,
-    cmd_rx: &mut mpsc::UnboundedReceiver<ManagedWsCommand<S>>,
+    cmd_rx: &mut ManagedWsCommandReceiver<S>,
 ) -> bool
 where
     S: Send + 'static,
