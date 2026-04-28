@@ -11,8 +11,9 @@ use tokio::task::JoinHandle;
 use crate::transport::WsTransport;
 use crate::ws::{
     WebSocketBufferConfig, WebSocketError, WsConnectionStatus, WsDisconnectAction,
-    WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsFrame, WsMessageAction, WsParseOutcome,
-    WsReconnectStrategy, WsSessionMode, WsSubscriptionAction, WsSubscriptionManager,
+    WsDisconnectCause, WsEndpointHandler, WsErrorAction, WsFrame, WsHealthMonitor, WsMessageAction,
+    WsParseOutcome, WsPingPongStrategy, WsPongResult, WsReconnectStrategy, WsSessionMode,
+    WsSubscriptionAction, WsSubscriptionManager,
 };
 
 #[derive(Debug)]
@@ -37,6 +38,48 @@ pub struct ManagedWsLoopHandle<S = ()> {
     pub cmd_tx: ManagedWsCommandSender<S>,
     pub status: Arc<AtomicU8>,
     loop_handle: Option<JoinHandle<()>>,
+}
+
+pub trait RequireWsHealth: Send + 'static {
+    type PingPong: WsPingPongStrategy;
+
+    fn ping_pong(&mut self) -> &mut Self::PingPong;
+    fn monitor(&mut self) -> &mut WsHealthMonitor;
+}
+
+pub struct RequiredWsHealth<P>
+where
+    P: WsPingPongStrategy,
+{
+    ping_pong: P,
+    monitor: WsHealthMonitor,
+}
+
+impl<P> RequiredWsHealth<P>
+where
+    P: WsPingPongStrategy,
+{
+    pub fn new(ping_pong: P, stale_threshold: Duration) -> Self {
+        Self {
+            ping_pong,
+            monitor: WsHealthMonitor::new(stale_threshold),
+        }
+    }
+}
+
+impl<P> RequireWsHealth for RequiredWsHealth<P>
+where
+    P: WsPingPongStrategy,
+{
+    type PingPong = P;
+
+    fn ping_pong(&mut self) -> &mut Self::PingPong {
+        &mut self.ping_pong
+    }
+
+    fn monitor(&mut self) -> &mut WsHealthMonitor {
+        &mut self.monitor
+    }
 }
 
 impl<S> ManagedWsLoopHandle<S> {
@@ -103,6 +146,28 @@ where
 {
     spawn_managed_ws_task(move |cmd_rx, status| {
         run_managed_ws_loop(url, transport, handler, reconnect, status, cmd_rx)
+    })
+}
+
+pub fn spawn_health_checked_managed_ws_loop<T, H, R, Q>(
+    url: String,
+    transport: T,
+    handler: H,
+    reconnect: R,
+    health: Q,
+) -> ManagedWsLoopHandle<
+    <<H as WsEndpointHandler>::Subscription as WsSubscriptionManager>::SubscriptionMessage,
+>
+where
+    T: WsTransport + Send + 'static,
+    H: WsEndpointHandler,
+    R: WsReconnectStrategy + Send + 'static,
+    Q: RequireWsHealth,
+{
+    spawn_managed_ws_task(move |cmd_rx, status| {
+        run_health_checked_managed_ws_loop(
+            url, transport, handler, reconnect, health, status, cmd_rx,
+        )
     })
 }
 
@@ -449,6 +514,318 @@ pub async fn run_managed_ws_loop<T, H, R>(
     }
 }
 
+pub async fn run_health_checked_managed_ws_loop<T, H, R, Q>(
+    url: String,
+    transport: T,
+    mut handler: H,
+    mut reconnect: R,
+    mut health: Q,
+    status: Arc<AtomicU8>,
+    mut cmd_rx: ManagedWsCommandReceiver<
+        <<H as WsEndpointHandler>::Subscription as WsSubscriptionManager>::SubscriptionMessage,
+    >,
+) where
+    T: WsTransport,
+    H: WsEndpointHandler,
+    R: WsReconnectStrategy,
+    Q: RequireWsHealth,
+{
+    let mut is_reconnect = false;
+    let mut pending_auth_commands = VecDeque::new();
+
+    loop {
+        status.store(
+            ws_status_to_u8(WsConnectionStatus::Connecting),
+            Ordering::Relaxed,
+        );
+        health.monitor().record_connect_attempt();
+
+        let connect = transport
+            .connect(url.clone(), WebSocketBufferConfig::default())
+            .await;
+        let (mut reader, mut writer) = match connect {
+            Ok(parts) => parts,
+            Err(err) => {
+                health
+                    .monitor()
+                    .record_internal_error("connect", &err.to_string());
+                status.store(
+                    ws_status_to_u8(WsConnectionStatus::Disconnected),
+                    Ordering::Relaxed,
+                );
+                let cause = WsDisconnectCause::InternalError {
+                    context: "connect".to_string(),
+                    error: err.to_string(),
+                };
+                let action = handler.classify_disconnect(&cause);
+                let delay = reconnect_delay(&mut reconnect, action);
+                let will_reconnect = delay.is_some();
+                let _ = notify_disconnect(&mut handler, &cause, will_reconnect);
+                let Some(delay) = delay else {
+                    return;
+                };
+                if !wait_reconnect_delay_or_shutdown(delay, &mut cmd_rx).await {
+                    return;
+                }
+                is_reconnect = true;
+                continue;
+            }
+        };
+
+        health.monitor().record_connect_success();
+        health.monitor().reset_connection();
+        health.ping_pong().reset();
+        reconnect.reset();
+        status.store(
+            ws_status_to_u8(WsConnectionStatus::Connected),
+            Ordering::Relaxed,
+        );
+        handler.reset_state();
+        handler.on_open();
+        if let Some(message) = handler.on_connection_opened(is_reconnect) {
+            let _ = handler.handle_message(message);
+        }
+        if let Some(payload) = handler.generate_auth()
+            && let Err(error) = send_payload(&mut handler, &mut writer, payload).await
+        {
+            health
+                .monitor()
+                .record_internal_error("auth_send", &error.to_string());
+            let cause = WsDisconnectCause::InternalError {
+                context: "auth_send".to_string(),
+                error: error.to_string(),
+            };
+            let action = handler.classify_disconnect(&cause);
+            let delay = reconnect_delay(&mut reconnect, action);
+            let will_reconnect = delay.is_some();
+            let _ = notify_disconnect(&mut handler, &cause, will_reconnect);
+            status.store(
+                ws_status_to_u8(WsConnectionStatus::Disconnected),
+                Ordering::Relaxed,
+            );
+            let Some(delay) = delay else {
+                return;
+            };
+            if !wait_reconnect_delay_or_shutdown(delay, &mut cmd_rx).await {
+                return;
+            }
+            is_reconnect = true;
+            continue;
+        }
+        let mut session_authenticated = handler.session_mode() == WsSessionMode::Public;
+        if session_authenticated
+            && let Err(error) = replay_subscriptions(&mut handler, &mut writer).await
+        {
+            health
+                .monitor()
+                .record_internal_error("subscription_replay", &error.to_string());
+            let cause = WsDisconnectCause::InternalError {
+                context: "subscription_replay".to_string(),
+                error: error.to_string(),
+            };
+            let action = handler.classify_disconnect(&cause);
+            let delay = reconnect_delay(&mut reconnect, action);
+            let will_reconnect = delay.is_some();
+            let _ = notify_disconnect(&mut handler, &cause, will_reconnect);
+            status.store(
+                ws_status_to_u8(WsConnectionStatus::Disconnected),
+                Ordering::Relaxed,
+            );
+            let Some(delay) = delay else {
+                return;
+            };
+            if !wait_reconnect_delay_or_shutdown(delay, &mut cmd_rx).await {
+                return;
+            }
+            is_reconnect = true;
+            continue;
+        }
+
+        let ping_sleep = tokio::time::sleep(health.ping_pong().interval());
+        tokio::pin!(ping_sleep);
+
+        let cause = loop {
+            tokio::select! {
+                command = cmd_rx.recv() => {
+                    match command {
+                        Some(ManagedWsCommand::Shutdown) | None => {
+                            status.store(ws_status_to_u8(WsConnectionStatus::Disconnected), Ordering::Relaxed);
+                            return;
+                        }
+                        Some(ManagedWsCommand::ForceReconnect(reason)) => {
+                            break WsDisconnectCause::EndpointRequested { reason };
+                        }
+                        Some(command) => {
+                            if !session_authenticated && command_requires_auth(&command) {
+                                pending_auth_commands.push_back(command);
+                                continue;
+                            }
+                            if let Err(error) = apply_command(&mut handler, &mut writer, command).await {
+                                health.monitor().record_internal_error("command", &error.to_string());
+                                break WsDisconnectCause::InternalError {
+                                    context: "command".to_string(),
+                                    error: error.to_string(),
+                                };
+                            }
+                            health.monitor().record_sent();
+                        }
+                    }
+                }
+                _ = &mut ping_sleep => {
+                    if health.ping_pong().is_stale() {
+                        break WsDisconnectCause::PongTimeout;
+                    }
+                    if health.monitor().is_stale() {
+                        break WsDisconnectCause::StaleData;
+                    }
+                    if let Some(frame) = health.ping_pong().create_ping() {
+                        handler.on_outbound_frame(&frame);
+                        if let Err(error) = writer.send(frame).await {
+                            health.monitor().record_internal_error("ping_send", &error.to_string());
+                            break WsDisconnectCause::InternalError {
+                                context: "ping_send".to_string(),
+                                error: error.to_string(),
+                            };
+                        }
+                        health.monitor().record_sent();
+                    }
+                    ping_sleep.as_mut().reset(tokio::time::Instant::now() + health.ping_pong().interval());
+                }
+                maybe_frame = reader.next() => {
+                    match maybe_frame {
+                        Some(Ok(frame)) => {
+                            health.monitor().record_message();
+                            handler.on_inbound_frame(&frame);
+                            match health.ping_pong().handle_inbound(&frame) {
+                                WsPongResult::Reply(reply) => {
+                                    handler.on_outbound_frame(&reply);
+                                    if let Err(error) = writer.send(reply).await {
+                                        health.monitor().record_internal_error("pong_reply", &error.to_string());
+                                        break WsDisconnectCause::InternalError {
+                                            context: "pong_reply".to_string(),
+                                            error: error.to_string(),
+                                        };
+                                    }
+                                    health.monitor().record_sent();
+                                    continue;
+                                }
+                                WsPongResult::PongReceived(rtt) => {
+                                    if let Some(rtt) = rtt {
+                                        health.monitor().record_rtt(rtt);
+                                    }
+                                    continue;
+                                }
+                                WsPongResult::InvalidPong => {
+                                    health.monitor().record_internal_error("ping", "invalid pong");
+                                    break WsDisconnectCause::PongTimeout;
+                                }
+                                WsPongResult::NotPong => {}
+                            }
+                            match handler.parse_frame(&frame) {
+                                Ok(WsParseOutcome::Message(action)) => {
+                                    match action {
+                                        WsMessageAction::Continue => {}
+                                        WsMessageAction::SessionAuthenticated => {
+                                            session_authenticated = true;
+                                            if let Err(error) = replay_subscriptions(&mut handler, &mut writer).await {
+                                                health.monitor().record_internal_error(
+                                                    "subscription_replay_after_auth",
+                                                    &error.to_string(),
+                                                );
+                                                break WsDisconnectCause::InternalError {
+                                                    context: "subscription_replay_after_auth".to_string(),
+                                                    error: error.to_string(),
+                                                };
+                                            }
+                                            if let Err(error) = apply_pending_auth_commands(
+                                                &mut handler,
+                                                &mut writer,
+                                                &mut pending_auth_commands,
+                                            )
+                                            .await
+                                            {
+                                                health.monitor().record_internal_error(
+                                                    "pending_auth_command",
+                                                    &error.to_string(),
+                                                );
+                                                break WsDisconnectCause::InternalError {
+                                                    context: "pending_auth_command".to_string(),
+                                                    error: error.to_string(),
+                                                };
+                                            }
+                                            health.monitor().record_sent();
+                                        }
+                                        WsMessageAction::Process(message) => {
+                                            if let Err(error) = handler.handle_message(message) {
+                                                health.monitor().record_internal_error(
+                                                    "handle_message",
+                                                    &error.to_string(),
+                                                );
+                                                break WsDisconnectCause::InternalError {
+                                                    context: "handle_message".to_string(),
+                                                    error: error.to_string(),
+                                                };
+                                            }
+                                        }
+                                        WsMessageAction::Reconnect(reason) => {
+                                            break WsDisconnectCause::EndpointRequested { reason };
+                                        }
+                                        WsMessageAction::Shutdown => {
+                                            status.store(ws_status_to_u8(WsConnectionStatus::Disconnected), Ordering::Relaxed);
+                                            return;
+                                        }
+                                    }
+                                }
+                                Ok(WsParseOutcome::ServerError { code, message, data }) => {
+                                    health.monitor().record_server_error(code, &message);
+                                    if matches!(handler.handle_server_error(code, &message, data), WsErrorAction::Reconnect | WsErrorAction::Fatal) {
+                                        break WsDisconnectCause::ServerError { code, message };
+                                    }
+                                }
+                                Err(error) => {
+                                    health.monitor().record_internal_error("parse", &error.to_string());
+                                }
+                            }
+                        }
+                        Some(Err(error)) => {
+                            health.monitor().record_internal_error("read", &error.to_string());
+                            break WsDisconnectCause::ReadFailure {
+                                error: error.to_string(),
+                            };
+                        }
+                        None => {
+                            break WsDisconnectCause::RemoteClosed;
+                        }
+                    }
+                }
+            }
+        };
+
+        status.store(
+            ws_status_to_u8(WsConnectionStatus::Disconnected),
+            Ordering::Relaxed,
+        );
+        if matches!(
+            cause,
+            WsDisconnectCause::PongTimeout | WsDisconnectCause::StaleData
+        ) {
+            health.monitor().record_error();
+        }
+        let action = handler.classify_disconnect(&cause);
+        let delay = reconnect_delay(&mut reconnect, action);
+        let will_reconnect = delay.is_some();
+        let _ = notify_disconnect(&mut handler, &cause, will_reconnect);
+        let Some(delay) = delay else {
+            return;
+        };
+        if !wait_reconnect_delay_or_shutdown(delay, &mut cmd_rx).await {
+            return;
+        }
+        health.monitor().increment_reconnect();
+        is_reconnect = true;
+    }
+}
+
 async fn apply_command<H, W>(
     handler: &mut H,
     writer: &mut W,
@@ -513,11 +890,15 @@ mod tests {
     use crate::testing::ReconnectableMockTransport;
     use crate::ws::{
         ManagedWsCommand, WsConnectionStatus, WsDisconnectAction, WsDisconnectCause,
-        WsEndpointHandler, WsErrorAction, WsMessageAction, WsParseOutcome, WsReconnectStrategy,
-        WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus, into_ws_message,
+        WsEndpointHandler, WsErrorAction, WsFrame, WsMessageAction, WsParseOutcome,
+        WsReconnectStrategy, WsSubscriptionAction, WsSubscriptionManager, WsSubscriptionStatus,
+        into_ws_message,
     };
 
-    use super::{run_managed_ws_loop, ws_status_from_u8};
+    use super::{
+        RequiredWsHealth, run_health_checked_managed_ws_loop, run_managed_ws_loop,
+        ws_status_from_u8,
+    };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Observed {
@@ -933,6 +1314,100 @@ mod tests {
             .expect("subscription outbound after auth");
         assert_eq!(crate::ws::message_bytes(&raw), Some(&b"RAW"[..]));
         assert_eq!(crate::ws::message_bytes(&sub), Some(&b"SUB"[..]));
+
+        cmd_tx.send(ManagedWsCommand::Shutdown).expect("shutdown");
+        handle.await.expect("managed loop join");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_checked_managed_loop_sends_protocol_ping_and_accepts_pong() {
+        let (transport, mut server) = ReconnectableMockTransport::channel_pair();
+        let status = Arc::new(AtomicU8::new(super::ws_status_to_u8(
+            WsConnectionStatus::Disconnected,
+        )));
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let health = RequiredWsHealth::new(
+            crate::ws::ProtocolPingPong::new(Duration::from_millis(10), Duration::from_secs(1)),
+            Duration::from_secs(1),
+        );
+        let handle = tokio::spawn(run_health_checked_managed_ws_loop(
+            "ws://example.invalid".to_string(),
+            transport,
+            TestEndpoint::new(Arc::clone(&events), None),
+            FastReconnect,
+            health,
+            Arc::clone(&status),
+            cmd_rx,
+        ));
+
+        let mut conn = server
+            .accept_connection_timeout(Duration::from_secs(1))
+            .await
+            .expect("connection");
+        let outbound = conn
+            .recv_outbound_timeout(Duration::from_secs(1))
+            .await
+            .expect("protocol ping outbound");
+        assert!(
+            matches!(outbound, WsFrame::Ping(_)),
+            "health checked loop must send websocket protocol pings, got {outbound:?}"
+        );
+        conn.send_inbound(WsFrame::Pong(bytes::Bytes::new()))
+            .expect("pong inbound");
+        assert!(
+            conn.recv_outbound_timeout(Duration::from_millis(5))
+                .await
+                .is_none(),
+            "pong response should be consumed by health strategy, not forwarded as app data"
+        );
+
+        cmd_tx.send(ManagedWsCommand::Shutdown).expect("shutdown");
+        handle.await.expect("managed loop join");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_checked_managed_loop_replies_to_server_protocol_ping() {
+        let (transport, mut server) = ReconnectableMockTransport::channel_pair();
+        let status = Arc::new(AtomicU8::new(super::ws_status_to_u8(
+            WsConnectionStatus::Disconnected,
+        )));
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let health = RequiredWsHealth::new(
+            crate::ws::ProtocolPingPong::new(Duration::from_secs(60), Duration::from_secs(60)),
+            Duration::from_secs(60),
+        );
+        let handle = tokio::spawn(run_health_checked_managed_ws_loop(
+            "ws://example.invalid".to_string(),
+            transport,
+            TestEndpoint::new(Arc::clone(&events), None),
+            FastReconnect,
+            health,
+            Arc::clone(&status),
+            cmd_rx,
+        ));
+
+        let mut conn = server
+            .accept_connection_timeout(Duration::from_secs(1))
+            .await
+            .expect("connection");
+        conn.send_inbound(WsFrame::Ping(bytes::Bytes::from_static(b"binance")))
+            .expect("server ping inbound");
+        let outbound = conn
+            .recv_outbound_timeout(Duration::from_secs(1))
+            .await
+            .expect("pong reply outbound");
+        assert_eq!(
+            outbound,
+            WsFrame::Pong(bytes::Bytes::from_static(b"binance"))
+        );
+        let events = events.lock().expect("events lock").clone();
+        assert_eq!(
+            events,
+            vec![Observed::Open(false)],
+            "protocol pings must be handled by shared-ws health, not endpoint parsing"
+        );
 
         cmd_tx.send(ManagedWsCommand::Shutdown).expect("shutdown");
         handle.await.expect("managed loop join");
