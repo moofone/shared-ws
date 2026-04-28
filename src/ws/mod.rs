@@ -12,7 +12,8 @@ pub use crate::core::connection_policy::{WsCircuitBreaker, jitter_delay};
 pub use crate::core::frame::{WsCloseFrame, WsFrame, WsText, frame_bytes, into_ws_frame};
 pub use crate::core::health::WsHealthMonitor;
 pub use crate::core::ping::{
-    ProtocolPingPong, WsApplicationPingPong, WsPingPongStrategy, WsPongResult,
+    ProtocolPingPong, ServerDrivenProtocolPingPong, WsApplicationPingPong, WsPingPongStrategy,
+    WsPongResult,
 };
 pub use crate::core::reconnect::ExponentialBackoffReconnect;
 pub use crate::core::types::*;
