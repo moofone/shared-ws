@@ -252,6 +252,7 @@ pub enum WsConnectionStatus {
 pub enum WsMessageAction<T> {
     Continue,
     SessionAuthenticated,
+    Send(Vec<u8>),
     Process(T),
     Reconnect(String),
     Shutdown,

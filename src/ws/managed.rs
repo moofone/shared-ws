@@ -458,6 +458,14 @@ pub async fn run_managed_ws_loop<T, H, R>(
                                                 };
                                             }
                                         }
+                                        WsMessageAction::Send(payload) => {
+                                            if let Err(error) = send_payload(&mut handler, &mut writer, payload).await {
+                                                break WsDisconnectCause::InternalError {
+                                                    context: "message_send".to_string(),
+                                                    error: error.to_string(),
+                                                };
+                                            }
+                                        }
                                         WsMessageAction::Process(message) => {
                                             if let Err(error) = handler.handle_message(message) {
                                                 break WsDisconnectCause::InternalError {
@@ -750,6 +758,19 @@ pub async fn run_health_checked_managed_ws_loop<T, H, R, Q>(
                                                 );
                                                 break WsDisconnectCause::InternalError {
                                                     context: "pending_auth_command".to_string(),
+                                                    error: error.to_string(),
+                                                };
+                                            }
+                                            health.monitor().record_sent();
+                                        }
+                                        WsMessageAction::Send(payload) => {
+                                            if let Err(error) = send_payload(&mut handler, &mut writer, payload).await {
+                                                health.monitor().record_internal_error(
+                                                    "message_send",
+                                                    &error.to_string(),
+                                                );
+                                                break WsDisconnectCause::InternalError {
+                                                    context: "message_send".to_string(),
                                                     error: error.to_string(),
                                                 };
                                             }
