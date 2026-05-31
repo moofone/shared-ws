@@ -464,7 +464,10 @@ mod tests {
         let (transport, mut server) = ReconnectableMockTransport::channel_pair();
 
         let (mut reader1, mut writer1) = transport
-            .connect("ws://mock.invalid".to_string(), WebSocketBufferConfig::default())
+            .connect(
+                "ws://mock.invalid".to_string(),
+                WebSocketBufferConfig::default(),
+            )
             .await
             .expect("first connect should succeed");
         let mut conn1 = server
@@ -476,8 +479,14 @@ mod tests {
             .send(into_ws_message(br#"{"hello":"one"}"#.to_vec()))
             .await
             .expect("writer should send");
-        assert!(conn1.recv_outbound_timeout(Duration::from_secs(1)).await.is_some());
-        conn1.send_text(r#"{"server":"one"}"#)
+        assert!(
+            conn1
+                .recv_outbound_timeout(Duration::from_secs(1))
+                .await
+                .is_some()
+        );
+        conn1
+            .send_text(r#"{"server":"one"}"#)
             .expect("server should send inbound");
         assert!(reader1.next().await.is_some());
         conn1.drop_socket();
@@ -485,7 +494,10 @@ mod tests {
         drop(reader1);
 
         let (mut reader2, mut writer2) = transport
-            .connect("ws://mock.invalid".to_string(), WebSocketBufferConfig::default())
+            .connect(
+                "ws://mock.invalid".to_string(),
+                WebSocketBufferConfig::default(),
+            )
             .await
             .expect("second connect should succeed");
         let mut conn2 = server
@@ -497,8 +509,14 @@ mod tests {
             .send(into_ws_message(br#"{"hello":"two"}"#.to_vec()))
             .await
             .expect("writer should send");
-        assert!(conn2.recv_outbound_timeout(Duration::from_secs(1)).await.is_some());
-        conn2.send_text(r#"{"server":"two"}"#)
+        assert!(
+            conn2
+                .recv_outbound_timeout(Duration::from_secs(1))
+                .await
+                .is_some()
+        );
+        conn2
+            .send_text(r#"{"server":"two"}"#)
             .expect("server should send inbound");
         assert!(reader2.next().await.is_some());
     }

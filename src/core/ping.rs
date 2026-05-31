@@ -31,6 +31,49 @@ pub struct ProtocolPingPong {
     last_pong: Option<Instant>,
 }
 
+/// Server-driven websocket control-frame heartbeat.
+///
+/// Some venues require clients to answer server Ping frames but do not require
+/// unsolicited client Ping frames. This strategy replies with same-payload Pong
+/// frames and leaves liveness to the surrounding [`WsHealthMonitor`].
+pub struct ServerDrivenProtocolPingPong {
+    check_interval: Duration,
+}
+
+impl ServerDrivenProtocolPingPong {
+    pub fn new(check_interval: Duration) -> Self {
+        Self { check_interval }
+    }
+}
+
+impl WsPingPongStrategy for ServerDrivenProtocolPingPong {
+    fn create_ping(&mut self) -> Option<WsFrame> {
+        None
+    }
+
+    fn handle_inbound(&mut self, message: &WsFrame) -> WsPongResult {
+        match message {
+            WsFrame::Ping(payload) => WsPongResult::Reply(WsFrame::Pong(payload.clone())),
+            WsFrame::Pong(_) => WsPongResult::PongReceived(None),
+            _ => WsPongResult::NotPong,
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {}
+
+    fn interval(&self) -> Duration {
+        self.check_interval
+    }
+
+    fn timeout(&self) -> Duration {
+        self.check_interval
+    }
+}
+
 impl ProtocolPingPong {
     pub fn new(interval: Duration, timeout: Duration) -> Self {
         Self {
@@ -232,6 +275,24 @@ mod tests {
 
         strategy.reset();
         assert!(!strategy.is_stale());
+    }
+
+    #[test]
+    fn server_driven_protocol_ping_pong_replies_without_client_ping() {
+        let mut strategy = ServerDrivenProtocolPingPong::new(Duration::from_secs(20));
+
+        assert!(
+            strategy.create_ping().is_none(),
+            "server-driven heartbeat must not send unsolicited client pings"
+        );
+        match strategy.handle_inbound(&WsFrame::Ping(Bytes::from_static(b"binance"))) {
+            WsPongResult::Reply(WsFrame::Pong(payload)) => {
+                assert_eq!(payload.as_ref(), b"binance")
+            }
+            other => panic!("expected same-payload pong reply, got {other:?}"),
+        }
+        assert!(!strategy.is_stale());
+        assert_eq!(strategy.interval(), Duration::from_secs(20));
     }
 
     #[test]
