@@ -6,6 +6,7 @@ use sonic_rs::JsonValueTrait;
 use crate::core::WebSocketError;
 
 const SHARED_WS_FIXTURE_CAPTURE_MODE_ENV: &str = "SHARED_WS_FIXTURE_CAPTURE_MODE";
+const SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV: &str = "SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WsFixtureRequirement {
@@ -46,7 +47,15 @@ pub fn clear_required_ws_contracts_for_tests() {
 }
 
 pub fn fixture_capture_mode_enabled() -> bool {
-    std::env::var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV)
+    env_truthy(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV)
+}
+
+pub fn live_without_fixtures_allowed() -> bool {
+    env_truthy(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV)
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
         .ok()
         .map(|raw| matches!(raw.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
@@ -92,7 +101,7 @@ fn ensure_live_capture_fixture(path: &PathBuf) -> Result<(), WebSocketError> {
 }
 
 pub fn ensure_live_ws_allowed() -> Result<(), WebSocketError> {
-    if fixture_capture_mode_enabled() {
+    if fixture_capture_mode_enabled() || live_without_fixtures_allowed() {
         return Ok(());
     }
     let guard = registry().lock().expect("ws fixture registry poisoned");
@@ -161,6 +170,11 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "shared-ws-fixture-policy-{}-{}",
@@ -183,9 +197,11 @@ mod tests {
 
     #[test]
     fn live_ws_requires_registered_contracts() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         clear_required_ws_contracts_for_tests();
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let err = ensure_live_ws_allowed().expect_err("missing registry should fail");
         assert!(err.to_string().contains("no required fixture contracts registered"));
@@ -193,9 +209,11 @@ mod tests {
 
     #[test]
     fn live_ws_rejects_non_live_capture_fixtures() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         clear_required_ws_contracts_for_tests();
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let success = temp_path("success.json");
         let error = temp_path("error.json");
@@ -218,9 +236,11 @@ mod tests {
 
     #[test]
     fn live_ws_accepts_live_capture_fixtures() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         clear_required_ws_contracts_for_tests();
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let success = temp_path("good-success.json");
         let error = temp_path("good-error.json");
@@ -240,8 +260,10 @@ mod tests {
 
     #[test]
     fn validator_requires_registered_contracts() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let err = validate_required_ws_contracts(&[])
             .expect_err("empty requirement list should fail validation");
@@ -250,8 +272,10 @@ mod tests {
 
     #[test]
     fn validator_rejects_missing_fixture_files() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let success = temp_path("validator-missing-success.json");
         let error = temp_path("validator-missing-error.json");
@@ -269,8 +293,10 @@ mod tests {
 
     #[test]
     fn validator_accepts_live_capture_fixtures() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         unsafe {
             std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
         }
         let success = temp_path("validator-good-success.json");
         let error = temp_path("validator-good-error.json");
@@ -288,5 +314,21 @@ mod tests {
 
         let _ = std::fs::remove_file(success);
         let _ = std::fs::remove_file(error);
+    }
+
+    #[test]
+    fn live_ws_allows_explicit_deployed_override_without_contracts() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        clear_required_ws_contracts_for_tests();
+        unsafe {
+            std::env::remove_var(SHARED_WS_FIXTURE_CAPTURE_MODE_ENV);
+            std::env::set_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV, "1");
+        }
+
+        ensure_live_ws_allowed().expect("deployed override should allow live ws");
+
+        unsafe {
+            std::env::remove_var(SHARED_WS_ALLOW_LIVE_WITHOUT_FIXTURES_ENV);
+        }
     }
 }
