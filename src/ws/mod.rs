@@ -3,6 +3,7 @@ pub mod health;
 pub mod managed;
 pub mod ping;
 pub mod runtime;
+pub mod server;
 pub mod types;
 
 use std::sync::Arc;
