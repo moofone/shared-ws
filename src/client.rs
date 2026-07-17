@@ -6,6 +6,7 @@ use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, accept_async as tungstenite_accept,
+    accept_async_with_config as tungstenite_accept_with_config,
     connect_async as tungstenite_connect, connect_async_tls_with_config as tungstenite_connect_tls,
     tungstenite::protocol::WebSocketConfig,
     tungstenite::{
@@ -217,6 +218,21 @@ pub async fn connect_async_tls_with_config(
 /// Accept an incoming websocket connection.
 pub async fn accept_async(stream: TcpStream) -> Result<WsClient, WebSocketError> {
     let ws = tungstenite_accept(MaybeTlsStream::Plain(stream))
+        .await
+        .map_err(|err| WebSocketError::ConnectionFailed(err.to_string()))?;
+    Ok(WsClient { inner: ws })
+}
+
+/// Accept an incoming websocket connection with explicit message/frame limits.
+///
+/// This is the server-side counterpart to [`connect_async_tls_with_config`] and
+/// is what [`crate::ws::server`] uses so an accepted connection is bounded by
+/// the same configuration surface as an outbound one.
+pub async fn accept_async_with_config(
+    stream: TcpStream,
+    config: WsConnectConfig,
+) -> Result<WsClient, WebSocketError> {
+    let ws = tungstenite_accept_with_config(MaybeTlsStream::Plain(stream), Some(config.into()))
         .await
         .map_err(|err| WebSocketError::ConnectionFailed(err.to_string()))?;
     Ok(WsClient { inner: ws })

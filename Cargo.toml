@@ -8,6 +8,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/moofone/shared-ws"
 readme = "README.md"
 
+[features]
+# Deterministic fault injection for `ws::server`, used by this crate's tests and
+# by downstream supervision tests. Strictly additive and off by default: the
+# production server API carries no fault hook.
+test-support = []
+
 [dependencies]
 bytes = "1.6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
