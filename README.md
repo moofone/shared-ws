@@ -108,6 +108,108 @@ Recommended pattern:
 `shared-ws::testing` gives the transport surface for deterministic replay; callers should add a
 small fixture catalog/scenario layer on top so contract coverage is enforced rather than remembered.
 
+## Managed Server (`ws::server`)
+
+A statically dispatched, supervised WebSocket **server** that owns every
+server-side transport primitive so applications never hold one directly. It is
+the mirror of the managed client: an application supplies per-connection
+application logic and a config, and gets back a handle it can dispatch to,
+observe, and shut down.
+
+```rust,no_run
+use std::time::Duration;
+use bytes::Bytes;
+use shared_ws::ws::server::{
+    spawn_managed_ws_server_task, ManagedWsServerStatus, WsServerConfig,
+    WsServerConnectionContext, WsServerEndpointAction, WsServerEndpointEvent,
+    WsServerEndpointFactory, WsServerEndpointHandler, WsServerRetryPolicy,
+};
+use shared_ws::ws::WsFrame;
+
+#[derive(Clone)]
+struct Feed(Bytes); // reference-counted payload: fanout clones a refcount, not bytes
+
+#[derive(Debug, thiserror::Error)]
+#[error("endpoint error")]
+struct EndpointError;
+
+struct Endpoint;
+impl WsServerEndpointHandler for Endpoint {
+    type Command = Feed;
+    type Error = EndpointError;
+    async fn on_event(
+        &mut self,
+        event: WsServerEndpointEvent<'_, Self::Command>,
+    ) -> Result<WsServerEndpointAction, Self::Error> {
+        Ok(match event {
+            WsServerEndpointEvent::Command(feed) => {
+                WsServerEndpointAction::Send(WsFrame::Binary(feed.0.clone()))
+            }
+            _ => WsServerEndpointAction::None,
+        })
+    }
+}
+
+struct Factory;
+impl WsServerEndpointFactory for Factory {
+    type Handler = Endpoint;
+    fn create_endpoint(&self, _ctx: &WsServerConnectionContext) -> Self::Handler {
+        Endpoint
+    }
+}
+
+# async fn run() {
+let config = WsServerConfig::new("127.0.0.1:8788".parse().unwrap());
+let handle = spawn_managed_ws_server_task(config, Factory, WsServerRetryPolicy::default())
+    .expect("spawn");
+handle
+    .wait_for_status(ManagedWsServerStatus::Listening, Duration::from_secs(5))
+    .await
+    .expect("listening");
+
+// One serialization, fanned out to every matching connection.
+let delivered = handle.dispatch(Feed(Bytes::from_static(b"tick"))).unwrap();
+println!("delivered to {delivered} clients");
+
+handle.shutdown_with_timeout(Duration::from_secs(5)).await.unwrap();
+# }
+```
+
+### Lifecycle and status
+
+`ManagedWsServerStatus` progresses `Starting → (Retrying ⇄) Listening →
+ShuttingDown → Stopped`, or to `Terminal` on unrecoverable failure. **`Stopped`
+and `Terminal` are disjoint**: a normal shutdown can never present as a terminal
+failure, so a supervisor may treat `Terminal` as an unambiguous replace signal
+(`terminal_error()` retains the typed cause for the life of the handle). An
+occupied address is `Retrying`, not a failure — the server rebinds with capped
+exponential backoff (100 ms → 5 s) when the address frees up.
+
+### Overload behaviour
+
+- `max_connections` is a **total budget for the server instance**, not per-IP; a
+  connection beyond it is closed immediately rather than queued.
+- `retained_commands_per_client` bounds fanout. A client that falls further
+  behind is closed and must reconnect for an authoritative snapshot — stale
+  frames are never queued on a slow client's behalf.
+- Commands are cloned once per connection, so payloads should be
+  reference-counted (`bytes::Bytes`): a payload is serialized once regardless of
+  connection count, and fanout copies refcounts, not bytes. The
+  `managed_server_fanout` Criterion benchmark measures this at 1/64/256 clients.
+
+### Cleanup
+
+`shutdown_with_timeout` closes the listener and drains clients within a budget,
+aborting and reporting a timeout if a connection cannot drain in time. Dropping
+the handle aborts the server task, which releases the listener and every
+connection task — the final guarantee that no transport outlives its owner.
+
+### Test-support boundary
+
+The `test-support` feature adds `spawn_managed_ws_server_task_with_faults` for
+deterministic accept-loop terminal-fault injection. It is strictly additive and
+off by default: **the production API carries no fault hook.**
+
 ## Documentation
 
 - Architecture: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)

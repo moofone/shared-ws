@@ -40,6 +40,10 @@ harness = false
 name = "frame_ingest"
 harness = false
 
+[[bench]]
+name = "managed_server_fanout"
+harness = false
+
 [profile.bench]
 # Benchmarks are specifically used to validate micro-optimizations; reduce codegen overhead.
 lto = "thin"

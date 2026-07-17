@@ -11,10 +11,12 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::config::{WsServerConfig, WsServerRetryPolicy};
+use super::runtime::{is_transient_accept_error, spawn_managed_ws_server_task};
 use super::types::{
-    ManagedWsServerStartError, ManagedWsServerStatus, ManagedWsServerTerminalError,
-    WS_SERVER_FRAME_BATCH_CAPACITY, WsServerCloseCause, WsServerConnectionContext,
-    WsServerEndpointAction, WsServerEndpointEvent, WsServerEndpointHandler, WsServerFrameBatch,
+    ManagedWsServerDispatchError, ManagedWsServerStartError, ManagedWsServerStatus,
+    ManagedWsServerTerminalError, WS_SERVER_FRAME_BATCH_CAPACITY, WsServerCloseCause,
+    WsServerConnectionContext, WsServerEndpointAction, WsServerEndpointEvent,
+    WsServerEndpointFactory, WsServerEndpointHandler, WsServerFrameBatch,
 };
 use crate::core::frame::{WsFrame, frame_bytes};
 
@@ -464,4 +466,171 @@ async fn a_subscribed_endpoint_is_never_closed_by_the_tick_deadline() {
             .expect("tick");
         assert!(matches!(action, WsServerEndpointAction::None));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transient vs listener-fatal accept errors
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transient_accept_errors_do_not_fault_the_listener() {
+    use std::io::{Error, ErrorKind};
+    for kind in [
+        ErrorKind::ConnectionAborted,
+        ErrorKind::ConnectionReset,
+        ErrorKind::Interrupted,
+        ErrorKind::WouldBlock,
+        ErrorKind::TimedOut,
+    ] {
+        assert!(
+            is_transient_accept_error(&Error::from(kind)),
+            "{kind:?} is a per-connection hiccup, not a listener fault"
+        );
+    }
+    // EMFILE (24) / ENFILE (23): descriptor exhaustion clears as clients close.
+    assert!(is_transient_accept_error(&Error::from_raw_os_error(24)));
+    assert!(is_transient_accept_error(&Error::from_raw_os_error(23)));
+
+    // A genuine listener fault must NOT be swallowed.
+    assert!(!is_transient_accept_error(&Error::from(
+        ErrorKind::AddrNotAvailable
+    )));
+    assert!(!is_transient_accept_error(&Error::from(
+        ErrorKind::PermissionDenied
+    )));
+}
+
+// ---------------------------------------------------------------------------
+// Handle behaviour that needs a spawned server
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct UnitCommand(Bytes);
+
+#[derive(Debug, thiserror::Error)]
+#[error("unit endpoint error")]
+struct UnitError;
+
+struct UnitHandler;
+
+impl WsServerEndpointHandler for UnitHandler {
+    type Command = UnitCommand;
+    type Error = UnitError;
+    async fn on_event(
+        &mut self,
+        event: WsServerEndpointEvent<'_, Self::Command>,
+    ) -> Result<WsServerEndpointAction, Self::Error> {
+        match event {
+            WsServerEndpointEvent::Command(cmd) => {
+                Ok(WsServerEndpointAction::Send(WsFrame::Binary(cmd.0.clone())))
+            }
+            _ => Ok(WsServerEndpointAction::None),
+        }
+    }
+}
+
+struct UnitFactory;
+
+impl WsServerEndpointFactory for UnitFactory {
+    type Handler = UnitHandler;
+    fn create_endpoint(&self, _ctx: &WsServerConnectionContext) -> Self::Handler {
+        UnitHandler
+    }
+}
+
+#[test]
+fn spawning_without_a_tokio_runtime_is_a_typed_start_error() {
+    // No runtime in scope: the server cannot spawn its task.
+    let err = spawn_managed_ws_server_task(
+        WsServerConfig::new(addr()),
+        UnitFactory,
+        WsServerRetryPolicy::default(),
+    )
+    .expect_err("spawn outside a runtime must fail");
+    assert_eq!(err, ManagedWsServerStartError::RuntimeUnavailable);
+}
+
+#[test]
+fn invalid_config_is_rejected_before_touching_the_runtime() {
+    // Config validation precedes the runtime check, so this fails even off-runtime.
+    let mut config = WsServerConfig::new(addr());
+    config.max_connections = 0;
+    let err = spawn_managed_ws_server_task(config, UnitFactory, WsServerRetryPolicy::default())
+        .expect_err("invalid config must fail");
+    assert!(matches!(
+        err,
+        ManagedWsServerStartError::InvalidConfig {
+            field: "max_connections",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn handle_debug_reports_status_and_connection_count() {
+    let handle = spawn_managed_ws_server_task(
+        WsServerConfig::new(free_loopback()),
+        UnitFactory,
+        WsServerRetryPolicy::default(),
+    )
+    .expect("spawn");
+    handle
+        .wait_for_status(ManagedWsServerStatus::Listening, Duration::from_secs(5))
+        .await
+        .expect("listening");
+    let rendered = format!("{handle:?}");
+    assert!(rendered.contains("ManagedWsServerHandle"));
+    assert!(rendered.contains("active_connections"));
+    assert_eq!(handle.active_connection_count(), 0);
+}
+
+#[tokio::test]
+async fn dispatch_with_zero_clients_on_a_running_server_is_ok_zero() {
+    let handle = spawn_managed_ws_server_task(
+        WsServerConfig::new(free_loopback()),
+        UnitFactory,
+        WsServerRetryPolicy::default(),
+    )
+    .expect("spawn");
+    handle
+        .wait_for_status(ManagedWsServerStatus::Listening, Duration::from_secs(5))
+        .await
+        .expect("listening");
+    assert_eq!(handle.dispatch(UnitCommand(Bytes::new())).expect("ok"), 0);
+    handle
+        .shutdown_with_timeout(Duration::from_secs(5))
+        .await
+        .expect("graceful shutdown");
+}
+
+fn free_loopback() -> SocketAddr {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let a = l.local_addr().expect("addr");
+    drop(l);
+    a
+}
+
+#[tokio::test]
+async fn dispatch_is_rejected_after_terminal() {
+    // Reachable without a fault feature: exhaust bind retries against a held port.
+    let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("squat");
+    let bound = squatter.local_addr().expect("addr");
+    let retry = WsServerRetryPolicy {
+        initial_backoff: Duration::from_millis(2),
+        max_backoff: Duration::from_millis(4),
+        max_attempts: Some(2),
+    };
+    let handle = spawn_managed_ws_server_task(WsServerConfig::new(bound), UnitFactory, retry)
+        .expect("spawn");
+    handle
+        .wait_for_status(ManagedWsServerStatus::Terminal, Duration::from_secs(5))
+        .await
+        .expect("terminal via bind exhaustion");
+    match handle.dispatch(UnitCommand(Bytes::new())) {
+        Err(ManagedWsServerDispatchError::Terminated(
+            ManagedWsServerTerminalError::BindRetryExhausted { .. },
+        )) => {}
+        other => panic!("dispatch after terminal must carry the cause, got {other:?}"),
+    }
+    drop(squatter);
 }

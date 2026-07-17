@@ -289,7 +289,7 @@ fn bind_listener(addr: SocketAddr, backlog: u32) -> std::io::Result<TcpListener>
 }
 
 /// Per-connection accept failures that say nothing about listener health.
-fn is_transient_accept_error(error: &std::io::Error) -> bool {
+pub(super) fn is_transient_accept_error(error: &std::io::Error) -> bool {
     if matches!(
         error.kind(),
         ErrorKind::ConnectionAborted
